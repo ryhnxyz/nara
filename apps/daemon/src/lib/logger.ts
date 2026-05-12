@@ -36,9 +36,17 @@ export function log(input: LogInput): BotLog {
     meta: input.meta ?? null,
   });
 
-  const pinoFn = input.level === "success" ? "info" : input.level;
-  const method = (pinoLogger as unknown as Record<string, (obj: Record<string, unknown>, msg: string) => void>)[pinoFn];
-  method?.({ scope: input.scope, agentId: input.agentId, ...input.meta }, input.message);
+  try {
+    const pinoFn = input.level === "success" ? "info" : input.level;
+    const logObj = { scope: input.scope, agentId: input.agentId, ...input.meta };
+    if (pinoFn === "debug") pinoLogger.debug(logObj, input.message);
+    else if (pinoFn === "warn") pinoLogger.warn(logObj, input.message);
+    else if (pinoFn === "error") pinoLogger.error(logObj, input.message);
+    else pinoLogger.info(logObj, input.message);
+  } catch {
+    // pino transport may not be ready — don't crash the process
+    console.log(`[${input.level}] ${input.scope}: ${input.message}`);
+  }
 
   logStream.emit("log", persisted);
   return persisted;
