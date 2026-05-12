@@ -38,7 +38,7 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
   const [threads, setThreads] = useState(initThreads);
   const [activeThread, setActiveThread] = useState<string>(() => createThreadId());
   const [agentDbId, setAgentDbId] = useState<string>(agents[0]?.id ?? "");
-  const [model, setModel] = useState<string>(models[0] ?? "kiro/claude-opus-4.7");
+  const FIXED_MODEL = "kiro/claude-opus-4.7";
   const [mode, setMode] = useState<Mode>("agent");
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamText, setStreamText] = useState("");
@@ -104,7 +104,7 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
           threadId: activeThread,
           agentDbId: agentDbId || undefined,
           content: text,
-          model,
+          model: FIXED_MODEL,
         }),
         signal: controller.signal,
       });
@@ -200,7 +200,7 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
           threadId: activeThread,
           agentDbId: agentDbId || undefined,
           content: text,
-          model,
+          model: FIXED_MODEL,
         }),
       });
       const data = await res.json();
@@ -329,18 +329,21 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
                 </option>
               ))}
             </select>
-            <select
-              className="select"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              style={{ width: 200 }}
+            <span
+              style={{
+                fontSize: 10,
+                letterSpacing: "0.12em",
+                color: "var(--accent)",
+                padding: "4px 10px",
+                border: "1px solid var(--accent-dim)",
+                borderRadius: 4,
+                background: "var(--accent-soft)",
+                fontFamily: "var(--font-mono)",
+              }}
+              title="Model is locked"
             >
-              {(models.length ? models : [model]).map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
+              ◆ kiro/claude-opus-4.7
+            </span>
           </div>
         </div>
 
