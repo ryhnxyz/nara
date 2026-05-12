@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface Thread {
   threadId: string;
@@ -22,6 +22,16 @@ interface Props {
   agents: any[];
 }
 
+interface ToolCallLive {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+  status: "running" | "ok" | "error";
+  result?: unknown;
+  error?: string;
+  durationMs?: number;
+}
+
 type Mode = "agent" | "chat";
 
 export function ChatClient({ threads: initThreads, models, agents }: Props) {
@@ -31,11 +41,13 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
   const [model, setModel] = useState<string>(models[0] ?? "kiro/claude-opus-4.7");
   const [mode, setMode] = useState<Mode>("agent");
   const [messages, setMessages] = useState<Message[]>([]);
-  const [toolCallLog, setToolCallLog] = useState<any[]>([]);
+  const [streamText, setStreamText] = useState("");
+  const [toolCalls, setToolCalls] = useState<ToolCallLive[]>([]);
   const [input, setInput] = useState("");
-  const [pending, startTransition] = useTransition();
+  const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     loadThread(activeThread);
@@ -43,7 +55,7 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, streamText, toolCalls]);
 
   async function loadThread(id: string) {
     try {
@@ -63,12 +75,15 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
     } catch {}
   }
 
-  async function send(e?: React.FormEvent) {
-    e?.preventDefault();
-    const text = input.trim();
-    if (!text) return;
+  function updateToolCall(id: string, patch: Partial<ToolCallLive>) {
+    setToolCalls((prev) => prev.map((tc) => (tc.id === id ? { ...tc, ...patch } : tc)));
+  }
+
+  async function streamAgent(text: string) {
+    setStreaming(true);
     setError(null);
-    setInput("");
+    setStreamText("");
+    setToolCalls([]);
 
     const optimistic: Message = {
       id: `tmp_${Date.now()}`,
@@ -77,31 +92,138 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
       createdAt: new Date().toISOString(),
     };
     setMessages((m) => [...m, optimistic]);
-    setToolCallLog([]);
 
-    const endpoint = mode === "agent" ? "/api/daemon/ai/agent" : "/api/daemon/ai/chat";
+    const controller = new AbortController();
+    abortRef.current = controller;
 
-    startTransition(async () => {
-      try {
-        const res = await fetch(endpoint, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            threadId: activeThread,
-            agentDbId: agentDbId || undefined,
-            content: text,
-            model,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? res.statusText);
-        if (data.toolCalls) setToolCallLog(data.toolCalls);
-        await loadThread(activeThread);
-        await refreshThreads();
-      } catch (err) {
+    try {
+      const res = await fetch("/api/daemon/ai/agent/stream", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          threadId: activeThread,
+          agentDbId: agentDbId || undefined,
+          content: text,
+          model,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok || !res.body) {
+        const errText = await res.text().catch(() => res.statusText);
+        throw new Error(errText.slice(0, 300));
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let idx: number;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          const block = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          let eventType = "message";
+          let dataLine = "";
+          for (const raw of block.split("\n")) {
+            const line = raw.trim();
+            if (line.startsWith("event:")) eventType = line.slice(6).trim();
+            else if (line.startsWith("data:")) dataLine += line.slice(5).trim();
+          }
+          if (!dataLine) continue;
+          let payload: any;
+          try {
+            payload = JSON.parse(dataLine);
+          } catch {
+            continue;
+          }
+
+          switch (eventType) {
+            case "text-delta":
+              setStreamText((t) => t + (payload.delta ?? ""));
+              break;
+            case "tool-call-start":
+              setToolCalls((prev) => [
+                ...prev,
+                { id: payload.id, name: payload.name, args: payload.args ?? {}, status: "running" },
+              ]);
+              break;
+            case "tool-call-result":
+              updateToolCall(payload.id, {
+                status: payload.ok ? "ok" : "error",
+                result: payload.result,
+                error: payload.error,
+                durationMs: payload.durationMs,
+              });
+              break;
+            case "step-end":
+              // no-op, just informational
+              break;
+            case "done":
+              await refreshThreads();
+              await loadThread(activeThread);
+              setStreamText("");
+              break;
+            case "error":
+              throw new Error(payload.message ?? "stream error");
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
         setError((err as Error).message);
       }
-    });
+    } finally {
+      setStreaming(false);
+      abortRef.current = null;
+    }
+  }
+
+  async function sendChatMode(text: string) {
+    setError(null);
+    const optimistic: Message = {
+      id: `tmp_${Date.now()}`,
+      role: "user",
+      content: text,
+      createdAt: new Date().toISOString(),
+    };
+    setMessages((m) => [...m, optimistic]);
+    try {
+      const res = await fetch("/api/daemon/ai/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          threadId: activeThread,
+          agentDbId: agentDbId || undefined,
+          content: text,
+          model,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? res.statusText);
+      await loadThread(activeThread);
+      await refreshThreads();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function send(e?: React.FormEvent) {
+    e?.preventDefault();
+    const text = input.trim();
+    if (!text || streaming) return;
+    setInput("");
+    if (mode === "agent") await streamAgent(text);
+    else await sendChatMode(text);
+  }
+
+  function stopStream() {
+    abortRef.current?.abort();
+    setStreaming(false);
   }
 
   return (
@@ -117,7 +239,8 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
             const id = createThreadId();
             setActiveThread(id);
             setMessages([]);
-            setToolCallLog([]);
+            setToolCalls([]);
+            setStreamText("");
           }}
         >
           + New chat
@@ -143,7 +266,10 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
                 }}
               >
                 <div style={{ fontWeight: 700 }}>{t.threadId.slice(-10)}</div>
-                <div className="muted" style={{ fontSize: 10, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                <div
+                  className="muted"
+                  style={{ fontSize: 10, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                >
                   {t.preview}
                 </div>
               </button>
@@ -152,7 +278,7 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
         </div>
       </aside>
 
-      <div className="panel" style={{ display: "flex", flexDirection: "column", height: "75vh" }}>
+      <div className="panel" style={{ display: "flex", flexDirection: "column", height: "80vh" }}>
         <div className="panel-header">
           <h2>
             {mode === "agent" ? "Agent mode" : "Chat mode"} — {activeThread.slice(-10)}
@@ -190,27 +316,42 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
                 CHAT
               </button>
             </div>
-            <select className="select" value={agentDbId} onChange={(e) => setAgentDbId(e.target.value)} style={{ width: 160 }}>
+            <select
+              className="select"
+              value={agentDbId}
+              onChange={(e) => setAgentDbId(e.target.value)}
+              style={{ width: 160 }}
+            >
               <option value="">(no context)</option>
               {agents.map((a) => (
-                <option key={a.id} value={a.id}>{a.agentId}</option>
+                <option key={a.id} value={a.id}>
+                  {a.agentId}
+                </option>
               ))}
             </select>
-            <select className="select" value={model} onChange={(e) => setModel(e.target.value)} style={{ width: 200 }}>
+            <select
+              className="select"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              style={{ width: 200 }}
+            >
               {(models.length ? models : [model]).map((m) => (
-                <option key={m} value={m}>{m}</option>
+                <option key={m} value={m}>
+                  {m}
+                </option>
               ))}
             </select>
           </div>
         </div>
 
         <div style={{ flex: 1, overflowY: "auto", padding: "4px 0" }}>
-          {messages.length === 0 ? (
+          {messages.length === 0 && !streamText && toolCalls.length === 0 ? (
             <div className="hint" style={{ padding: 14 }}>
               {mode === "agent" ? (
                 <>
-                  <strong style={{ color: "var(--accent)" }}>Agent mode</strong> — AI has access to all bot tools and can execute actions autonomously.
-                  Try: <em>“farm NARA for agent ryhn-nara-01”</em> or <em>“check dm inbox for all agents and claim any balls”</em>.
+                  <strong style={{ color: "var(--accent)" }}>Agent mode (streaming)</strong> — AI has access to all bot tools. Try:{" "}
+                  <em>"farm NARA for agent ryhn-nara-01"</em> or{" "}
+                  <em>"check dm inbox for all agents and claim any balls"</em>.
                 </>
               ) : (
                 <>Chat mode — plain Q&A without tools. Agent context is injected for better answers.</>
@@ -218,47 +359,130 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
             </div>
           ) : (
             messages.map((m) => (
-              <div key={m.id} style={{ marginBottom: 14, paddingBottom: 12, borderBottom: "1px solid var(--border)" }}>
-                <div style={{ fontSize: 9, letterSpacing: "0.22em", color: m.role === "user" ? "var(--info)" : "var(--accent)", marginBottom: 4 }}>
+              <div
+                key={m.id}
+                style={{ marginBottom: 14, paddingBottom: 12, borderBottom: "1px solid var(--border)" }}
+              >
+                <div
+                  style={{
+                    fontSize: 9,
+                    letterSpacing: "0.22em",
+                    color: m.role === "user" ? "var(--info)" : "var(--accent)",
+                    marginBottom: 4,
+                  }}
+                >
                   {m.role.toUpperCase()} · {new Date(m.createdAt).toLocaleTimeString()}
                 </div>
                 <div style={{ whiteSpace: "pre-wrap", fontSize: 12, lineHeight: 1.6 }}>{m.content}</div>
               </div>
             ))
           )}
-          {toolCallLog.length > 0 && (
-            <div style={{ padding: 10, background: "#05070a", border: "1px solid var(--border)", borderRadius: 4, marginBottom: 12 }}>
-              <div style={{ fontSize: 9, letterSpacing: "0.22em", color: "var(--text-muted)", marginBottom: 6 }}>TOOL CALLS</div>
-              {toolCallLog.map((tc, i) => (
-                <div key={i} style={{ fontSize: 11, fontFamily: "var(--font-mono)", marginBottom: 4 }}>
-                  <span style={{ color: tc.error ? "var(--danger)" : "var(--accent)" }}>
-                    {tc.error ? "✗" : "✓"} {tc.name}
-                  </span>
-                  {" "}
-                  <span className="muted" style={{ fontSize: 10 }}>({tc.durationMs ?? 0}ms)</span>
+
+          {toolCalls.length > 0 && (
+            <div
+              style={{
+                padding: 10,
+                background: "#05070a",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                marginBottom: 12,
+              }}
+            >
+              <div style={{ fontSize: 9, letterSpacing: "0.22em", color: "var(--text-muted)", marginBottom: 6 }}>
+                TOOL CALLS ({toolCalls.length})
+              </div>
+              {toolCalls.map((tc) => (
+                <div
+                  key={tc.id}
+                  style={{ fontSize: 11, fontFamily: "var(--font-mono)", marginBottom: 6, paddingBottom: 6, borderBottom: "1px dashed var(--border)" }}
+                >
+                  <div>
+                    <span
+                      style={{
+                        color:
+                          tc.status === "running"
+                            ? "var(--info)"
+                            : tc.status === "ok"
+                              ? "var(--accent)"
+                              : "var(--danger)",
+                      }}
+                    >
+                      {tc.status === "running" ? "◌" : tc.status === "ok" ? "✓" : "✗"} {tc.name}
+                    </span>
+                    {tc.durationMs !== undefined ? (
+                      <span className="muted" style={{ fontSize: 10, marginLeft: 6 }}>
+                        ({tc.durationMs}ms)
+                      </span>
+                    ) : null}
+                  </div>
+                  {Object.keys(tc.args).length > 0 && (
+                    <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>
+                      args: {JSON.stringify(tc.args).slice(0, 120)}
+                    </div>
+                  )}
+                  {tc.error && (
+                    <div style={{ fontSize: 10, color: "var(--danger)", marginTop: 2 }}>
+                      error: {tc.error.slice(0, 200)}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
           )}
+
+          {streamText && (
+            <div style={{ marginBottom: 14, paddingBottom: 12, borderBottom: "1px solid var(--border)" }}>
+              <div
+                style={{
+                  fontSize: 9,
+                  letterSpacing: "0.22em",
+                  color: "var(--accent)",
+                  marginBottom: 4,
+                }}
+              >
+                ASSISTANT · streaming…
+              </div>
+              <div style={{ whiteSpace: "pre-wrap", fontSize: 12, lineHeight: 1.6 }}>
+                {streamText}
+                <span style={{ opacity: 0.5 }}>▊</span>
+              </div>
+            </div>
+          )}
+
           <div ref={bottomRef} />
         </div>
 
-        {error ? <div className="hint" style={{ color: "var(--danger)", marginBottom: 8 }}>{error}</div> : null}
+        {error ? (
+          <div className="hint" style={{ color: "var(--danger)", marginBottom: 8 }}>
+            {error}
+          </div>
+        ) : null}
 
-        <form onSubmit={send} className="row" style={{ gap: 8, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+        <form
+          onSubmit={send}
+          className="row"
+          style={{ gap: 8, borderTop: "1px solid var(--border)", paddingTop: 12 }}
+        >
           <input
             className="input"
             style={{ flex: 1 }}
             placeholder={mode === "agent" ? "Tell the agent what to do…" : "Ask a question…"}
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            disabled={streaming}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) send(e);
             }}
           />
-          <button className="btn btn-primary" type="submit" disabled={pending || !input.trim()}>
-            {pending ? "…" : "Send"}
-          </button>
+          {streaming ? (
+            <button type="button" className="btn btn-danger" onClick={stopStream}>
+              ■ Stop
+            </button>
+          ) : (
+            <button className="btn btn-primary" type="submit" disabled={!input.trim()}>
+              Send
+            </button>
+          )}
         </form>
       </div>
     </div>

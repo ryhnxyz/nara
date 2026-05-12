@@ -1,9 +1,11 @@
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import { chatComplete, listModels } from "../ai/provider";
 import { generateTweet } from "../ai/tweet-gen";
 import { appendChatMessage, listThreads, openDb, threadMessages, getAgent } from "@nara-bot/db";
 import { env } from "../lib/env";
 import { runAgentTurn } from "../ai/agent-runtime";
+import { runAgentTurnStream } from "../ai/agent-runtime-stream";
 
 export const aiRoute = new Hono();
 
@@ -104,6 +106,10 @@ aiRoute.post("/chat", async (c) => {
  * The AI can call tools (list_agents, run_flow, claim_dragonball, etc.)
  * and chain them until the task is done.
  */
+/**
+ * Tool-calling agent (non-streaming) — JSON response.
+ * Kept for compatibility; prefer /agent/stream for UX.
+ */
 aiRoute.post("/agent", async (c) => {
   const body = await c.req.json<{
     threadId: string;
@@ -160,6 +166,93 @@ aiRoute.post("/agent", async (c) => {
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500);
   }
+});
+
+/**
+ * Streaming tool-calling agent.
+ * Returns SSE events: text-delta | tool-call-start | tool-call-result | step-end | done | error.
+ * Client reconstructs the streamed text + renders tool calls live.
+ */
+aiRoute.post("/agent/stream", async (c) => {
+  const body = await c.req.json<{
+    threadId: string;
+    agentDbId?: string;
+    content: string;
+    model?: string;
+    maxSteps?: number;
+  }>();
+
+  if (!body.threadId || !body.content) {
+    return c.json({ error: "threadId and content required" }, 400);
+  }
+
+  const db = openDb();
+  const contextAgent = body.agentDbId ? getAgent(db, body.agentDbId) : null;
+
+  // Persist user message now so thread history is intact even if client disconnects
+  appendChatMessage(db, {
+    threadId: body.threadId,
+    agentId: contextAgent?.id ?? null,
+    role: "user",
+    content: body.content,
+  });
+
+  const history = threadMessages(db, body.threadId, 40)
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .slice(0, -1)
+    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+
+  const systemPrompt = buildAgenticSystemPrompt(contextAgent);
+
+  return streamSSE(c, async (stream) => {
+    let fullText = "";
+    const toolSummary: Array<{ id: string; name: string; ok: boolean; durationMs: number }> = [];
+    const abort = new AbortController();
+    stream.onAbort(() => abort.abort());
+
+    try {
+      for await (const ev of runAgentTurnStream({
+        systemPrompt,
+        history,
+        userMessage: body.content,
+        model: body.model,
+        contextAgentDbId: contextAgent?.id ?? null,
+        maxSteps: body.maxSteps ?? 6,
+        signal: abort.signal,
+      })) {
+        // Forward every event to the client
+        await stream.writeSSE({ event: ev.type, data: JSON.stringify(ev) });
+
+        if (ev.type === "text-delta") fullText += ev.delta;
+        if (ev.type === "tool-call-result") {
+          toolSummary.push({ id: ev.id, name: ev.name, ok: ev.ok, durationMs: ev.durationMs });
+        }
+        if (ev.type === "done" || ev.type === "error") {
+          // Persist final assistant message so reload shows conversation
+          const content = formatAgentResponse(
+            fullText || (ev.type === "error" ? `(error: ${ev.message})` : "(no text)"),
+            toolSummary
+          );
+          appendChatMessage(db, {
+            threadId: body.threadId,
+            agentId: contextAgent?.id ?? null,
+            role: "assistant",
+            content,
+          });
+          break;
+        }
+      }
+    } catch (err) {
+      const message = (err as Error).message;
+      await stream.writeSSE({ event: "error", data: JSON.stringify({ type: "error", message }) });
+      appendChatMessage(db, {
+        threadId: body.threadId,
+        agentId: contextAgent?.id ?? null,
+        role: "assistant",
+        content: `(stream error: ${message})`,
+      });
+    }
+  });
 });
 
 function buildSystemPrompt(agent: any, extra?: string): string {
