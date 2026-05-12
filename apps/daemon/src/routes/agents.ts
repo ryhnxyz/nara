@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { existsSync, mkdirSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 import {
   createAgentRecord,
   deleteAgent,
@@ -9,10 +11,20 @@ import {
   latestFlowRun,
 } from "@nara-bot/db";
 import { isValidAgentId, sanitizeAgentId } from "@nara-bot/core";
+import { env } from "../lib/env";
 import { log } from "../lib/logger";
 import { cancelFlow, isFlowActive, runFullFlow } from "../flow/runner";
+import { naracli, extractTxSignature } from "../naracli/wrapper";
 
 export const agentsRoute = new Hono();
+
+function masterWalletPath(): string {
+  return resolve(env.walletsDir, "..", "master-wallet.json");
+}
+
+function agentWalletPath(agentId: string): string {
+  return resolve(env.walletsDir, `${agentId}.json`);
+}
 
 agentsRoute.get("/", (c) => {
   const db = openDb();
@@ -24,29 +36,65 @@ agentsRoute.get("/", (c) => {
   return c.json({ agents });
 });
 
+/**
+ * POST /api/agents
+ * Body: { agentId, displayName?, referral?, autoCreateWallet? }
+ *
+ * If autoCreateWallet=true (default), also creates the wallet file immediately
+ * and returns the new wallet address so the frontend can fund it.
+ */
 agentsRoute.post("/", async (c) => {
   const body = await c.req.json<{
     agentId: string;
     displayName?: string;
     referral?: string;
+    autoCreateWallet?: boolean;
   }>();
   const cleaned = sanitizeAgentId(body.agentId ?? "");
   if (!isValidAgentId(cleaned)) {
     return c.json({ error: "agent-id must be 7-32 chars, lowercase alphanumeric + hyphens" }, 400);
   }
+
+  const db = openDb();
+  let agent;
   try {
-    const agent = createAgentRecord(openDb(), {
+    agent = createAgentRecord(db, {
       agentId: cleaned,
       displayName: body.displayName,
       referral: body.referral ?? null,
     });
     log({ agentId: agent.id, level: "success", scope: "agents", message: `created ${agent.agentId}` });
-    return c.json({ agent }, 201);
   } catch (err) {
     const msg = (err as Error).message;
     if (msg.includes("UNIQUE")) return c.json({ error: "agent-id already exists locally" }, 409);
     return c.json({ error: msg }, 500);
   }
+
+  // Auto-create wallet by default so user immediately sees address to fund
+  if (body.autoCreateWallet !== false) {
+    try {
+      mkdirSync(env.walletsDir, { recursive: true });
+      const wpath = agentWalletPath(cleaned);
+      if (!existsSync(wpath)) {
+        const r = await naracli.walletCreate(wpath, { agentId: cleaned, timeoutMs: 60_000 });
+        if (!r.ok) {
+          log({ agentId: agent.id, level: "warn", scope: "agents", message: `wallet create failed: ${r.stderr.slice(0, 200)}` });
+        }
+      }
+      if (existsSync(wpath)) {
+        const addr = await naracli.address({ walletPath: wpath, agentId: cleaned });
+        if (addr) {
+          patchAgent(db, agent.id, { walletPath: wpath, walletAddress: addr });
+          agent = { ...agent, walletPath: wpath, walletAddress: addr };
+          log({ agentId: agent.id, level: "success", scope: "agents", message: `wallet ready: ${addr}` });
+        }
+      }
+    } catch (err) {
+      log({ agentId: agent.id, level: "error", scope: "agents", message: `wallet init failed: ${(err as Error).message}` });
+    }
+  }
+
+  return c.json({ agent }, 201);
 });
 
 agentsRoute.get("/:id", (c) => {
@@ -67,17 +115,94 @@ agentsRoute.delete("/:id", (c) => {
   return c.json({ ok: true });
 });
 
+/**
+ * POST /api/agents/:id/fund-from-master
+ * Transfer from the master wallet to this agent's wallet.
+ * Body: { amount?: number }  default = env.minWalletBalance
+ */
+agentsRoute.post("/:id/fund-from-master", async (c) => {
+  const db = openDb();
+  const agent = getAgent(db, c.req.param("id"));
+  if (!agent) return c.json({ error: "agent not found" }, 404);
+  if (!agent.walletAddress) return c.json({ error: "agent has no wallet yet" }, 400);
+
+  const masterPath = masterWalletPath();
+  if (!existsSync(masterPath)) return c.json({ error: "master wallet not imported (go to Settings)" }, 400);
+
+  const body = await c.req.json<{ amount?: number }>().catch(() => ({} as { amount?: number }));
+  const amount = body.amount ?? env.minWalletBalance;
+
+  const r = await naracli.transfer(agent.walletAddress, amount, {
+    walletPath: masterPath,
+    agentId: agent.agentId,
+    timeoutMs: 180_000,
+    logScope: "agents.fund-from-master",
+  });
+  if (!r.ok) return c.json({ error: r.stderr.slice(0, 300) || "transfer failed" }, 500);
+
+  const tx = extractTxSignature(r.stdout);
+  log({
+    agentId: agent.id,
+    level: "success",
+    scope: "agents.fund",
+    message: `Funded ${agent.agentId} with ${amount} NARA`,
+    meta: { tx, to: agent.walletAddress },
+  });
+  return c.json({ ok: true, txSignature: tx, amount, to: agent.walletAddress });
+});
+
+/**
+ * POST /api/agents/:id/run
+ * Run the bot flow for this agent.
+ * Body supports autoFundFromMaster:true which funds before flow if balance < min.
+ */
 agentsRoute.post("/:id/run", async (c) => {
   const id = c.req.param("id");
-  const body = await c.req.json<{
+  type RunBody = {
     bindTweetUrl?: string;
     dailyTweetUrl?: string;
     tweetBoostAfterClaim?: boolean;
     skipFirstPost?: boolean;
     skipDailyTweet?: boolean;
-  }>().catch(() => ({}));
+    autoFundFromMaster?: boolean;
+    fundAmount?: number;
+  };
+  const body = (await c.req.json<RunBody>().catch(() => ({}))) as RunBody;
 
   if (isFlowActive(id)) return c.json({ error: "flow already running" }, 409);
+
+  const db = openDb();
+  const agent = getAgent(db, id);
+  if (!agent) return c.json({ error: "agent not found" }, 404);
+
+  // Pre-flow: auto-fund if requested and master wallet exists and agent has address
+  if (body.autoFundFromMaster && agent.walletAddress) {
+    const masterPath = masterWalletPath();
+    if (existsSync(masterPath)) {
+      try {
+        const currentBal = await naracli.balance({ walletPath: agent.walletPath ?? "", agentId: agent.agentId });
+        if (currentBal.nara === null || currentBal.nara < env.minWalletBalance) {
+          const amount = body.fundAmount ?? env.minWalletBalance;
+          log({ agentId: agent.id, level: "info", scope: "agents.fund", message: `Auto-funding ${amount} NARA before flow` });
+          const r = await naracli.transfer(agent.walletAddress, amount, {
+            walletPath: masterPath,
+            agentId: agent.agentId,
+            timeoutMs: 180_000,
+            logScope: "agents.fund-from-master",
+          });
+          if (r.ok) {
+            log({ agentId: agent.id, level: "success", scope: "agents.fund", message: `Pre-funded ${amount} NARA ✓` });
+          } else {
+            log({ agentId: agent.id, level: "warn", scope: "agents.fund", message: `Auto-fund failed: ${r.stderr.slice(0, 200)}` });
+          }
+        }
+      } catch (err) {
+        log({ agentId: agent.id, level: "warn", scope: "agents.fund", message: `Auto-fund error: ${(err as Error).message}` });
+      }
+    } else {
+      log({ agentId: agent.id, level: "warn", scope: "agents.fund", message: "autoFundFromMaster requested but no master wallet imported" });
+    }
+  }
 
   runFullFlow(id, body).catch((err) => {
     log({ agentId: id, level: "error", scope: "flow", message: `flow crashed: ${(err as Error).message}` });

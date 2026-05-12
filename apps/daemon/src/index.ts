@@ -11,6 +11,7 @@ import { dragonballRoute } from "./routes/dragonball";
 import { aiRoute } from "./routes/ai";
 import { skillsRoute } from "./routes/skills";
 import { distributeRoute } from "./routes/distribute";
+import { masterWalletRoute } from "./routes/master-wallet";
 import { startDistributeWorker } from "./workers/distribute";
 
 const app = new Hono();
@@ -34,6 +35,7 @@ app.route("/api/dragonball", dragonballRoute);
 app.route("/api/ai", aiRoute);
 app.route("/api/skills", skillsRoute);
 app.route("/api/distribute", distributeRoute);
+app.route("/api/master-wallet", masterWalletRoute);
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 app.onError((err, c) => {
