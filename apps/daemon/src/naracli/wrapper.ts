@@ -29,8 +29,8 @@ function resolveBin(bin: "naracli" | "agentx-cli"): { command: string; prefix: s
 function buildExec(bin: "naracli" | "agentx-cli", args: string[], opts: RunOpts) {
   const { command, prefix } = resolveBin(bin);
   const finalArgs: string[] = [...prefix];
-  // naracli puts `-w <path>` BEFORE the subcommand
-  if (bin === "naracli" && opts.walletPath) {
+  // Both naracli and agentx-cli take `-w <path>` as a global option BEFORE the subcommand.
+  if (opts.walletPath) {
     finalArgs.push("-w", opts.walletPath);
   }
   finalArgs.push(...args);
