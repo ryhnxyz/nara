@@ -1,16 +1,23 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   openDb,
   listAgents,
   getAgent,
   getAgentByAgentId,
   createAgentRecord,
+  deleteAgent,
+  patchAgent,
   listDragonBallClaims,
   recentLogs,
+  recentFlowRuns,
+  latestFlowRun,
 } from "@nara-bot/db";
 import { isValidAgentId, sanitizeAgentId } from "@nara-bot/core";
-import { naracli, agentx } from "../naracli/wrapper";
+import { naracli, agentx, extractTxSignature } from "../naracli/wrapper";
 import { runFullFlow, isFlowActive, cancelFlow } from "../flow/runner";
 import { getDistributeState, runDistribution, configureDistribute } from "../workers/distribute";
+import { env } from "../lib/env";
 import { generateTweet } from "./tweet-gen";
 
 /**
@@ -325,6 +332,245 @@ export const TOOLS: AgentTool[] = [
     description: "Get current auto-distribute worker state.",
     parameters: { type: "object", properties: {} },
     handler: async () => getDistributeState(),
+  },
+
+  // ==================== Wallet ops ====================
+
+  {
+    name: "get_master_wallet_state",
+    description: "Get state of the operator's master wallet (address + balance). The master wallet funds agents and is the default sweep target.",
+    parameters: { type: "object", properties: {} },
+    handler: async () => {
+      const path = resolve(env.walletsDir, "..", "master-wallet.json");
+      if (!existsSync(path)) return { imported: false };
+      const addr = await naracli.address({ walletPath: path });
+      const bal = await naracli.balance({ walletPath: path });
+      return { imported: true, address: addr, balance: bal.nara };
+    },
+  },
+
+  {
+    name: "fund_agent_from_master",
+    description: "Transfer NARA from the master wallet to an agent's wallet. Uses env.minWalletBalance by default if amount not provided.",
+    parameters: {
+      type: "object",
+      properties: {
+        agentDbId: { type: "string" },
+        amount: { type: "number", description: "NARA amount (default 0.15)" },
+      },
+    },
+    handler: async (args, ctx) => {
+      const agent = resolveAgent(args, ctx);
+      if (!agent.walletAddress) return { error: "agent has no wallet yet" };
+      const masterPath = resolve(env.walletsDir, "..", "master-wallet.json");
+      if (!existsSync(masterPath)) return { error: "master wallet not imported" };
+      const amount = Number(args.amount ?? env.minWalletBalance);
+      const r = await naracli.transfer(agent.walletAddress, amount, {
+        walletPath: masterPath,
+        agentId: agent.agentId,
+        timeoutMs: 180_000,
+        logScope: "ai.fund",
+      });
+      if (!r.ok) return { ok: false, error: r.stderr.slice(0, 300) };
+      return { ok: true, amount, txSignature: extractTxSignature(r.stdout) };
+    },
+  },
+
+  {
+    name: "transfer_from_agent",
+    description: "Transfer NARA from an agent's wallet to any destination address. Use this to manually consolidate earnings.",
+    parameters: {
+      type: "object",
+      properties: {
+        agentDbId: { type: "string" },
+        to: { type: "string", description: "destination wallet address" },
+        amount: { type: "number" },
+      },
+      required: ["to", "amount"],
+    },
+    handler: async (args, ctx) => {
+      const agent = resolveAgent(args, ctx);
+      if (!agent.walletPath) return { error: "agent wallet not ready" };
+      const r = await naracli.transfer(String(args.to), Number(args.amount), {
+        walletPath: agent.walletPath,
+        agentId: agent.agentId,
+        timeoutMs: 180_000,
+        logScope: "ai.transfer",
+      });
+      if (!r.ok) return { ok: false, error: r.stderr.slice(0, 300) };
+      return { ok: true, txSignature: extractTxSignature(r.stdout) };
+    },
+  },
+
+  // ==================== Twitter / X ====================
+
+  {
+    name: "bind_twitter",
+    description: "Bind a Twitter account to an agent via naracli. Any valid X post URL works — content verified loosely. Rewards 1 NARA + 100 boost credits.",
+    parameters: {
+      type: "object",
+      properties: {
+        agentDbId: { type: "string" },
+        tweetUrl: { type: "string", description: "X tweet URL (format: https://x.com/user/status/id)" },
+      },
+      required: ["tweetUrl"],
+    },
+    handler: async (args, ctx) => {
+      const agent = resolveAgent(args, ctx);
+      if (!agent.walletPath) return { error: "wallet not ready — run_flow first" };
+      const r = await naracli.agentBindTwitter(String(args.tweetUrl), agent.agentId, {
+        walletPath: agent.walletPath,
+        timeoutMs: 180_000,
+      });
+      if (r.ok) patchAgent(openDb(), agent.id, { twitterBound: true });
+      return { ok: r.ok, stdout: r.stdout.slice(-300), stderr: r.stderr.slice(-200) };
+    },
+  },
+
+  {
+    name: "submit_daily_tweet",
+    description: "Submit a tweet URL to naracli for the Daily X Post campaign (0.1 NARA + boost credits, once per 24h).",
+    parameters: {
+      type: "object",
+      properties: {
+        agentDbId: { type: "string" },
+        tweetUrl: { type: "string" },
+      },
+      required: ["tweetUrl"],
+    },
+    handler: async (args, ctx) => {
+      const agent = resolveAgent(args, ctx);
+      if (!agent.walletPath) return { error: "wallet not ready" };
+      const r = await naracli.agentSubmitTweet(String(args.tweetUrl), agent.agentId, {
+        walletPath: agent.walletPath,
+        timeoutMs: 180_000,
+      });
+      return { ok: r.ok, stdout: r.stdout.slice(-300), stderr: r.stderr.slice(-200) };
+    },
+  },
+
+  // ==================== AgentX ====================
+
+  {
+    name: "stake_on_agentx",
+    description: "Stake NARA on AgentX campaign 2 (required to participate in Dragon Ball hunt). Default 0.01 NARA.",
+    parameters: {
+      type: "object",
+      properties: {
+        agentDbId: { type: "string" },
+        amount: { type: "number", description: "default 0.01" },
+      },
+    },
+    handler: async (args, ctx) => {
+      const agent = resolveAgent(args, ctx);
+      if (!agent.walletPath) return { error: "wallet not ready" };
+      const amount = Number(args.amount ?? env.stakeAmount);
+      const r = await agentx.stake(amount, {
+        walletPath: agent.walletPath,
+        agentId: agent.agentId,
+        timeoutMs: 180_000,
+      });
+      if (r.ok) patchAgent(openDb(), agent.id, { staked: true });
+      return { ok: r.ok, amount, stdout: r.stdout.slice(-300), stderr: r.stderr.slice(-200) };
+    },
+  },
+
+  {
+    name: "register_agent_onchain",
+    description: "Register an agent on-chain via naracli (free for 8+ char IDs, uses --relay gasless).",
+    parameters: {
+      type: "object",
+      properties: {
+        agentDbId: { type: "string" },
+      },
+    },
+    handler: async (args, ctx) => {
+      const agent = resolveAgent(args, ctx);
+      if (!agent.walletPath) return { error: "wallet not ready" };
+      const r = await naracli.agentRegister(agent.agentId, {
+        walletPath: agent.walletPath,
+        referral: agent.referral ?? undefined,
+        timeoutMs: 180_000,
+      });
+      return { ok: r.ok, tx: extractTxSignature(r.stdout), stdout: r.stdout.slice(-300), stderr: r.stderr.slice(-200) };
+    },
+  },
+
+  // ==================== Flow history ====================
+
+  {
+    name: "get_last_flow_run",
+    description: "Get the most recent flow run for an agent (status, step-by-step progress).",
+    parameters: {
+      type: "object",
+      properties: { agentDbId: { type: "string" } },
+    },
+    handler: async (args, ctx) => {
+      const agent = resolveAgent(args, ctx);
+      const run = latestFlowRun(openDb(), agent.id);
+      return run ?? { error: "no flow runs yet" };
+    },
+  },
+
+  {
+    name: "list_flow_runs",
+    description: "List recent flow runs across all agents (latest 20). Useful for dashboard summary.",
+    parameters: {
+      type: "object",
+      properties: { limit: { type: "number" } },
+    },
+    handler: async (args) => {
+      const runs = recentFlowRuns(openDb(), Number(args.limit ?? 20));
+      return { runs, count: runs.length };
+    },
+  },
+
+  // ==================== Destructive ops ====================
+
+  {
+    name: "delete_agent",
+    description: "Delete an agent from the LOCAL database. Does NOT delete on-chain registration. Wallet file on disk is kept.",
+    parameters: {
+      type: "object",
+      properties: {
+        agentDbId: { type: "string" },
+        confirm: { type: "boolean", description: "must be true to delete" },
+      },
+      required: ["confirm"],
+    },
+    handler: async (args, ctx) => {
+      if (!args.confirm) return { error: "pass confirm:true to delete" };
+      const agent = resolveAgent(args, ctx);
+      deleteAgent(openDb(), agent.id);
+      return { ok: true, deleted: agent.agentId };
+    },
+  },
+
+  // ==================== Distribute / sweep ====================
+
+  {
+    name: "run_distribute_now_for_agent",
+    description: "Sweep a single agent's earnings to the configured master/sweep target now.",
+    parameters: {
+      type: "object",
+      properties: { agentDbId: { type: "string" } },
+    },
+    handler: async (args, ctx) => {
+      const agent = resolveAgent(args, ctx);
+      if (!agent.walletPath || !agent.walletAddress) return { error: "wallet not ready" };
+      const state = getDistributeState();
+      if (!state.masterAddress) return { error: "no sweep target configured — set in Settings" };
+      const bal = await naracli.balance({ walletPath: agent.walletPath, agentId: agent.agentId });
+      if (!bal.ok || bal.nara === null) return { error: "balance check failed" };
+      const sendable = Math.max(0, bal.nara - state.keepNara);
+      if (sendable < state.minNara) return { ok: true, skipped: true, reason: `below min (${bal.nara} NARA)` };
+      const r = await naracli.transfer(state.masterAddress, Number(sendable.toFixed(6)), {
+        walletPath: agent.walletPath,
+        agentId: agent.agentId,
+        timeoutMs: 180_000,
+      });
+      return { ok: r.ok, amount: sendable, tx: extractTxSignature(r.stdout) };
+    },
   },
 ];
 
