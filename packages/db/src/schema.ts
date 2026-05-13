@@ -100,4 +100,32 @@ CREATE TABLE IF NOT EXISTS automation_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_automation_runs_started ON automation_runs(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_automation_runs_worker ON automation_runs(worker, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS automation_activity (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  target_id TEXT,
+  target_author TEXT,
+  status TEXT NOT NULL,
+  note TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_automation_activity_agent ON automation_activity(agent_id, created_at DESC);
 `;
+
+/**
+ * Idempotent column additions for tables that might have existed before new
+ * fields were added. Each statement is wrapped in try/catch because SQLite does
+ * not support IF NOT EXISTS for ADD COLUMN.
+ */
+export const migrationsSql: string[] = [
+  "ALTER TABLE automation_settings ADD COLUMN scan_dm_inbox INTEGER NOT NULL DEFAULT 1",
+  "ALTER TABLE automation_settings ADD COLUMN scan_feed INTEGER NOT NULL DEFAULT 1",
+  "ALTER TABLE automation_settings ADD COLUMN feed_limit INTEGER NOT NULL DEFAULT 50",
+  "ALTER TABLE automation_settings ADD COLUMN engage_activity INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE automation_settings ADD COLUMN likes_per_poll INTEGER NOT NULL DEFAULT 3",
+  "ALTER TABLE automation_settings ADD COLUMN comments_per_poll INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE automation_settings ADD COLUMN follows_per_poll INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE automation_runs ADD COLUMN phase TEXT",
+];

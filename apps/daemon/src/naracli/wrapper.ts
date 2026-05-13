@@ -153,8 +153,8 @@ export const naracli = {
     return runCli("naracli", ["skills", "remove", name], { ...opts, logScope: "naracli.skills.remove" });
   },
 
-async activity(opts: RunOpts = {}): Promise<CliResult> {
-return runCli("naracli", ["activity"], { ...opts, logScope: "naracli.activity" });
+  async activity(opts: RunOpts = {}): Promise<CliResult> {
+    return runCli("naracli", ["activity"], { ...opts, logScope: "naracli.activity" });
   },
 
   async transfer(to: string, amount: number, opts: RunOpts): Promise<CliResult> {
@@ -165,6 +165,52 @@ return runCli("naracli", ["activity"], { ...opts, logScope: "naracli.activity" }
     );
   },
 };
+
+// Post shape returned by `agentx feed`/`agentx posts` in JSON mode
+export interface AgentXPost {
+  id: string;
+  postId?: string;
+  authorPubkey: string;
+  agentId: string;
+  title: string | null;
+  content: string;
+  tags: string[];
+  likeCount: number;
+  commentCount: number;
+  repostCount: number;
+  hotScore: number;
+  hotRewarded: boolean;
+  eggSent: boolean;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  txSignature: string;
+}
+
+export interface AgentXComment {
+  id: string;
+  postId: string;
+  agentId: string;
+  content: string;
+  createdAt: string;
+}
+
+function parseJsonSafe<T>(s: string): T | null {
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    // Some CLI outputs prepend log lines. Find the first `[` or `{`.
+    const start = s.search(/[\[{]/);
+    if (start < 0) return null;
+    const end = s.lastIndexOf(s[start] === "[" ? "]" : "}");
+    if (end < 0) return null;
+    try {
+      return JSON.parse(s.slice(start, end + 1)) as T;
+    } catch {
+      return null;
+    }
+  }
+}
 
 export const agentx = {
   raw: (args: string[], opts?: RunOpts) => runCli("agentx-cli", args, opts),
@@ -197,6 +243,70 @@ export const agentx = {
   async codeStatus(id: string, opts: RunOpts): Promise<CliResult> {
     return runCli("agentx-cli", ["code", "status", id], { ...opts, logScope: "agentx.code.status" });
   },
+
+  /**
+   * Fetch global feed (latest posts). Uses JSON output so we can filter by eggSent.
+   */
+  async feed(opts: RunOpts & { limit?: number; before?: string } = {} as any): Promise<{ result: CliResult; posts: AgentXPost[] }> {
+    const args = ["-j", "feed", "--limit", String(opts.limit ?? 20)];
+    if (opts.before) args.push("--before", opts.before);
+    const r = await runCli("agentx-cli", args, { ...opts, logScope: "agentx.feed" });
+    const posts = r.ok ? (parseJsonSafe<AgentXPost[]>(r.stdout) ?? []) : [];
+    return { result: r, posts };
+  },
+
+  /**
+   * View posts list (same as feed but supports filter by author/tag).
+   */
+  async posts(
+    opts: RunOpts & { limit?: number; before?: string; author?: string; tag?: string } = {} as any
+  ): Promise<{ result: CliResult; posts: AgentXPost[] }> {
+    const args = ["-j", "posts", "--limit", String(opts.limit ?? 20)];
+    if (opts.before) args.push("--before", opts.before);
+    if (opts.author) args.push("--author", opts.author);
+    if (opts.tag) args.push("--tag", opts.tag);
+    const r = await runCli("agentx-cli", args, { ...opts, logScope: "agentx.posts" });
+    const posts = r.ok ? (parseJsonSafe<AgentXPost[]>(r.stdout) ?? []) : [];
+    return { result: r, posts };
+  },
+
+  /**
+   * Fetch comments for a post. Used to harvest egg codes shared in comments.
+   */
+  async comments(postId: string, opts: RunOpts = {} as any): Promise<{ result: CliResult; comments: AgentXComment[]; codes: string[] }> {
+    const r = await runCli("agentx-cli", ["-j", "comments", postId], { ...opts, logScope: "agentx.comments" });
+    const comments = r.ok ? (parseJsonSafe<AgentXComment[]>(r.stdout) ?? []) : [];
+    const codes = extractCodes(r.stdout);
+    return { result: r, comments, codes };
+  },
+
+  async like(targetId: string, opts: RunOpts & { type?: "post" | "comment" } = {} as any): Promise<CliResult> {
+    const args = ["like", targetId];
+    if (opts.type) args.push("--type", opts.type);
+    return runCli("agentx-cli", args, { ...opts, timeoutMs: 60_000, logScope: "agentx.like" });
+  },
+
+  async unlike(targetId: string, opts: RunOpts & { type?: "post" | "comment" } = {} as any): Promise<CliResult> {
+    const args = ["unlike", targetId];
+    if (opts.type) args.push("--type", opts.type);
+    return runCli("agentx-cli", args, { ...opts, timeoutMs: 60_000, logScope: "agentx.unlike" });
+  },
+
+  async follow(agentId: string, opts: RunOpts = {} as any): Promise<CliResult> {
+    return runCli("agentx-cli", ["follow", agentId], { ...opts, timeoutMs: 60_000, logScope: "agentx.follow" });
+  },
+
+  async post(content: string, opts: RunOpts & { title?: string; tags?: string[] } = {} as any): Promise<CliResult> {
+    const args: string[] = ["post"];
+    if (opts.title) args.push("--title", opts.title);
+    if (opts.tags && opts.tags.length) args.push("--tags", opts.tags.slice(0, 5).join(","));
+    args.push(content);
+    return runCli("agentx-cli", args, { ...opts, timeoutMs: 60_000, logScope: "agentx.post" });
+  },
+
+  async comment(postId: string, content: string, opts: RunOpts = {} as any): Promise<CliResult> {
+    return runCli("agentx-cli", ["comment", postId, content], { ...opts, timeoutMs: 60_000, logScope: "agentx.comment" });
+  },
 };
 
 /**
@@ -212,7 +322,6 @@ export function extractCodes(text: string): string[] {
 }
 
 export function extractTxSignature(text: string): string | null {
-  // Solana / Nara signatures are base58 64+ chars
   const m = text.match(/\b([1-9A-HJ-NP-Za-km-z]{64,100})\b/);
   return m ? m[1] : null;
 }

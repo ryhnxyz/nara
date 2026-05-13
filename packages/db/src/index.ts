@@ -10,7 +10,7 @@ import {
   type FlowStepRecord,
   type NaraAgent,
 } from "@nara-bot/core";
-import { schemaSql } from "./schema";
+import { schemaSql, migrationsSql } from "./schema";
 
 export type Db = Database.Database;
 
@@ -32,6 +32,16 @@ export function openDb(): Db {
 
 export function initDb(db = openDb()): void {
   db.exec(schemaSql);
+  // Apply idempotent column-add migrations. SQLite lacks IF NOT EXISTS for ADD COLUMN,
+  // so we swallow "duplicate column" errors.
+  for (const sql of migrationsSql) {
+    try {
+      db.exec(sql);
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (!/duplicate column name|no such table/i.test(msg)) throw err;
+    }
+  }
 }
 
 // -------- Agents --------

@@ -14,6 +14,13 @@ automationRoute.post("/hunt/configure", async (c) => {
     tweetBoostUrl?: string | null;
     targetAgentIds?: string[] | null;
     maxRunsPerDay?: number;
+    scanDmInbox?: boolean;
+    scanFeed?: boolean;
+    feedLimit?: number;
+    engageActivity?: boolean;
+    likesPerPoll?: number;
+    commentsPerPoll?: number;
+    followsPerPoll?: number;
   };
   const body = (await c.req.json<ConfigureBody>().catch(() => ({}))) as ConfigureBody;
   const patch: any = {};
@@ -23,6 +30,13 @@ automationRoute.post("/hunt/configure", async (c) => {
   if (body.tweetBoostUrl !== undefined) patch.tweetBoostUrl = body.tweetBoostUrl || null;
   if (body.targetAgentIds !== undefined) patch.targetAgentIds = body.targetAgentIds ?? null;
   if (body.maxRunsPerDay !== undefined) patch.maxRunsPerDay = Math.max(1, Number(body.maxRunsPerDay));
+  if (body.scanDmInbox !== undefined) patch.scanDmInbox = !!body.scanDmInbox;
+  if (body.scanFeed !== undefined) patch.scanFeed = !!body.scanFeed;
+  if (body.feedLimit !== undefined) patch.feedLimit = Math.max(10, Math.min(200, Number(body.feedLimit)));
+  if (body.engageActivity !== undefined) patch.engageActivity = !!body.engageActivity;
+  if (body.likesPerPoll !== undefined) patch.likesPerPoll = Math.max(0, Math.min(20, Number(body.likesPerPoll)));
+  if (body.commentsPerPoll !== undefined) patch.commentsPerPoll = Math.max(0, Math.min(5, Number(body.commentsPerPoll)));
+  if (body.followsPerPoll !== undefined) patch.followsPerPoll = Math.max(0, Math.min(10, Number(body.followsPerPoll)));
   const state = configureHunt(patch);
   return c.json({ ok: true, state });
 });
@@ -38,9 +52,6 @@ automationRoute.get("/hunt/runs", (c) => {
   return c.json({ runs });
 });
 
-/**
- * SSE stream of hunt worker state changes.
- */
 automationRoute.get("/hunt/stream", (c) =>
   streamSSE(c, async (stream) => {
     let closed = false;
