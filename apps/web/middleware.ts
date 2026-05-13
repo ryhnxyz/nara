@@ -28,20 +28,18 @@ function isPublic(pathname: string): boolean {
   for (const p of PUBLIC_PATHS) {
     if (pathname === p || pathname.startsWith(p + "/")) return true;
   }
-  // Next.js internal
   if (pathname.startsWith("/_next/")) return true;
   if (pathname === "/favicon.ico") return true;
   return false;
 }
 
-export function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (isPublic(pathname)) return NextResponse.next();
 
-  const session = readSessionFromRequest(req);
+  const session = await readSessionFromRequest(req);
 
-  // Unauthenticated or not whitelisted → redirect to /login (or 401 for API)
   if (!session || !session.whitelisted) {
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -51,8 +49,6 @@ export function middleware(req: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
-  // Authenticated — for daemon API calls, inject owner header so the daemon
-  // can scope all queries to this user's agents/wallets/runs.
   if (pathname.startsWith("/api/daemon/") || pathname.startsWith("/api/daemon-stream")) {
     const headers = new Headers(req.headers);
     headers.set("x-owner-email", session.email);

@@ -25,13 +25,11 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(new URL("/login?error=missing_token", origin));
   }
 
-  // Optional CSRF state validation (init-sso set nara_oauth_state cookie)
   const cookieState = req.cookies.get("nara_oauth_state")?.value;
   if (stateFromUrl && cookieState && stateFromUrl !== cookieState) {
     return NextResponse.redirect(new URL("/login?error=state_mismatch", origin));
   }
 
-  // Verify token via portal (recommended path — no local JWT parsing)
   const verified = await verifyPortalToken(token);
   if (!verified.valid) {
     return NextResponse.redirect(new URL(`/login?error=${encodeURIComponent(verified.reason)}`, origin));
@@ -43,13 +41,11 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(new URL("/login?error=no_email", origin));
   }
 
-  // Re-validate whitelist (defence in depth — admin can revoke between login and callback)
   const stillAllowed = claims.whitelisted === true ? true : await checkWhitelist(email);
   if (!stillAllowed) {
     return NextResponse.redirect(new URL("/login?error=not_whitelisted", origin));
   }
 
-  // Build session cookie (local TTL 24h — we revalidate via middleware if needed)
   const session = buildSession(
     email,
     claims.app_name ?? PORTAL_APP_NAME,
@@ -57,13 +53,12 @@ export async function GET(req: NextRequest) {
     claims.session_id ?? claims.sid,
   );
 
-  // Fire-and-forget analytics
   trackAnalytics("user", email);
   trackAnalytics("visit");
 
+  const cookieValue = await encodeSession(session);
   const res = NextResponse.redirect(new URL("/", origin));
-  res.cookies.set(SESSION_COOKIE, encodeSession(session), SESSION_COOKIE_OPTIONS);
-  // Clean up transient state cookie
+  res.cookies.set(SESSION_COOKIE, cookieValue, SESSION_COOKIE_OPTIONS);
   res.cookies.set("nara_oauth_state", "", { path: "/", maxAge: 0 });
   return res;
 }

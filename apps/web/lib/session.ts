@@ -1,19 +1,17 @@
 /**
- * Session cookie helpers (httpOnly, encrypted-ish via HMAC signing).
+ * Session cookie helpers — Edge-runtime compatible via Web Crypto API.
  *
  * Cookie name: nara_session
  * Payload: base64url(json) + "." + hmac(signing_secret, payload)
  *
- * Contains: { email, appName, whitelisted, sid, exp }
- * We don't need to store the raw JWT because the portal already verified it;
- * re-validation happens on each sensitive call via checkWhitelist/verify-token.
+ * Works in BOTH Next.js middleware (Edge runtime, no node:crypto) and
+ * API routes (Node runtime). Uses globalThis.crypto.subtle everywhere.
  */
-import crypto from "node:crypto";
 import type { NextRequest } from "next/server";
 import { cookies } from "next/headers";
 
 export const SESSION_COOKIE = "nara_session";
-const DEFAULT_TTL_SEC = 60 * 60 * 24; // 24h local session regardless of portal JWT exp (we revalidate)
+const DEFAULT_TTL_SEC = 60 * 60 * 24; // 24h local session (revalidated against portal)
 
 export interface SessionPayload {
   email: string;
@@ -29,32 +27,59 @@ function secret(): string {
   return s;
 }
 
-function b64urlEncode(buf: Buffer | string): string {
-  return Buffer.from(buf).toString("base64url");
+// ---- base64url helpers (no Buffer — Edge-safe) ----
+function b64urlEncodeBytes(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
-function b64urlDecode(s: string): Buffer {
-  return Buffer.from(s, "base64url");
+function b64urlEncodeString(s: string): string {
+  const bytes = new TextEncoder().encode(s);
+  return b64urlEncodeBytes(bytes);
+}
+function b64urlDecodeToString(s: string): string {
+  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
+  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
 }
 
-export function encodeSession(payload: SessionPayload): string {
-  const body = b64urlEncode(JSON.stringify(payload));
-  const sig = crypto.createHmac("sha256", secret()).update(body).digest("base64url");
+async function hmacSha256(secretKey: string, data: string): Promise<string> {
+  const key = await globalThis.crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secretKey),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await globalThis.crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  return b64urlEncodeBytes(new Uint8Array(sig));
+}
+
+function timingSafeEqualStr(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+export async function encodeSession(payload: SessionPayload): Promise<string> {
+  const body = b64urlEncodeString(JSON.stringify(payload));
+  const sig = await hmacSha256(secret(), body);
   return `${body}.${sig}`;
 }
 
-export function decodeSession(token: string): SessionPayload | null {
+export async function decodeSession(token: string): Promise<SessionPayload | null> {
   if (!token) return null;
   const idx = token.indexOf(".");
   if (idx < 0) return null;
   const body = token.slice(0, idx);
   const sig = token.slice(idx + 1);
-  const expected = crypto.createHmac("sha256", secret()).update(body).digest("base64url");
-  // Constant-time compare
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  const expected = await hmacSha256(secret(), body);
+  if (!timingSafeEqualStr(sig, expected)) return null;
   try {
-    const payload = JSON.parse(b64urlDecode(body).toString("utf8")) as SessionPayload;
+    const payload = JSON.parse(b64urlDecodeToString(body)) as SessionPayload;
     if (!payload || typeof payload !== "object") return null;
     if (typeof payload.exp !== "number") return null;
     if (payload.exp * 1000 < Date.now()) return null;
@@ -82,14 +107,14 @@ export function buildSession(
   };
 }
 
-/** Read session from an incoming middleware request. */
-export function readSessionFromRequest(req: NextRequest): SessionPayload | null {
+/** Read + verify session from an incoming middleware request. */
+export async function readSessionFromRequest(req: NextRequest): Promise<SessionPayload | null> {
   const raw = req.cookies.get(SESSION_COOKIE)?.value;
   if (!raw) return null;
   return decodeSession(raw);
 }
 
-/** Read session inside route handler / server component. */
+/** Read + verify session inside route handler / server component. */
 export async function readSessionFromCookies(): Promise<SessionPayload | null> {
   const store = await cookies();
   const raw = store.get(SESSION_COOKIE)?.value;
