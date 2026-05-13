@@ -31,6 +31,7 @@ export interface NaraAgent {
   updatedAt: string;
   lastRunAt: string | null;
   lastRunStatus: string | null;
+  ownerEmail: string | null;
 }
 
 export interface BotLog {

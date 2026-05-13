@@ -449,6 +449,7 @@ export async function runPoll(): Promise<PollResult> {
     insertAutomationRun(db, {
       worker: WORKER_KEY,
       agentId: agent.id,
+      ownerEmail: (agent as any).ownerEmail ?? null,
       startedAt: runStart,
       finishedAt: nowIso(),
       status: errorsForAgent > 0 && codesClaimedForAgent === 0 ? "error" : codesFoundForAgent + engagementsForAgent > 0 ? "ok" : "skipped",

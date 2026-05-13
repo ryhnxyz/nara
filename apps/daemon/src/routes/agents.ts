@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { existsSync, mkdirSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { resolve } from "node:path";
 import {
   createAgentRecord,
   deleteAgent,
@@ -15,20 +15,24 @@ import { env } from "../lib/env";
 import { log } from "../lib/logger";
 import { cancelFlow, isFlowActive, runFullFlow } from "../flow/runner";
 import { naracli, extractTxSignature } from "../naracli/wrapper";
+import { ownerFromContext, ownerWalletsDir, ownerMasterWalletPath } from "../lib/owner";
 
 export const agentsRoute = new Hono();
 
-function masterWalletPath(): string {
+function masterWalletPath(owner: string | null): string {
+  if (owner) return ownerMasterWalletPath(owner);
   return resolve(env.walletsDir, "..", "master-wallet.json");
 }
 
-function agentWalletPath(agentId: string): string {
-  return resolve(env.walletsDir, `${agentId}.json`);
+function agentWalletPath(owner: string | null, agentId: string): string {
+  const dir = owner ? ownerWalletsDir(owner) : env.walletsDir;
+  return resolve(dir, `${agentId}.json`);
 }
 
 agentsRoute.get("/", (c) => {
+  const owner = ownerFromContext(c);
   const db = openDb();
-  const agents = listAgents(db).map((a) => ({
+  const agents = listAgents(db, owner).map((a) => ({
     ...a,
     activeFlow: isFlowActive(a.id),
     lastRun: latestFlowRun(db, a.id),
@@ -55,6 +59,7 @@ agentsRoute.post("/", async (c) => {
     return c.json({ error: "agent-id must be 7-32 chars, lowercase alphanumeric + hyphens" }, 400);
   }
 
+  const owner = ownerFromContext(c);
   const db = openDb();
   let agent;
   try {
@@ -62,8 +67,9 @@ agentsRoute.post("/", async (c) => {
       agentId: cleaned,
       displayName: body.displayName,
       referral: body.referral ?? null,
+      ownerEmail: owner,
     });
-    log({ agentId: agent.id, level: "success", scope: "agents", message: `created ${agent.agentId}` });
+    log({ agentId: agent.id, level: "success", scope: "agents", message: `created ${agent.agentId}${owner ? ` for ${owner}` : ""}` });
   } catch (err) {
     const msg = (err as Error).message;
     if (msg.includes("UNIQUE")) return c.json({ error: "agent-id already exists locally" }, 409);
@@ -73,8 +79,9 @@ agentsRoute.post("/", async (c) => {
   // Auto-create wallet by default so user immediately sees address to fund
   if (body.autoCreateWallet !== false) {
     try {
-      mkdirSync(env.walletsDir, { recursive: true });
-      const wpath = agentWalletPath(cleaned);
+      const walletsDir = owner ? (await import("../lib/owner")).ownerWalletsDir(owner) : env.walletsDir;
+      mkdirSync(walletsDir, { recursive: true });
+      const wpath = agentWalletPath(owner, cleaned);
       if (!existsSync(wpath)) {
         const r = await naracli.walletCreate(wpath, { agentId: cleaned, timeoutMs: 60_000 });
         if (!r.ok) {
@@ -98,20 +105,29 @@ agentsRoute.post("/", async (c) => {
 });
 
 agentsRoute.get("/:id", (c) => {
+  const owner = ownerFromContext(c);
   const db = openDb();
-  const agent = getAgent(db, c.req.param("id"));
+  const agent = getAgent(db, c.req.param("id"), owner);
   if (!agent) return c.json({ error: "not found" }, 404);
   return c.json({ agent, lastRun: latestFlowRun(db, agent.id), activeFlow: isFlowActive(agent.id) });
 });
 
 agentsRoute.patch("/:id", async (c) => {
+  const owner = ownerFromContext(c);
+  const db = openDb();
+  const existing = getAgent(db, c.req.param("id"), owner);
+  if (!existing) return c.json({ error: "not found" }, 404);
   const body = await c.req.json<Record<string, unknown>>();
-  patchAgent(openDb(), c.req.param("id"), body as any);
+  patchAgent(db, c.req.param("id"), body as any);
   return c.json({ ok: true });
 });
 
 agentsRoute.delete("/:id", (c) => {
-  deleteAgent(openDb(), c.req.param("id"));
+  const owner = ownerFromContext(c);
+  const db = openDb();
+  const existing = getAgent(db, c.req.param("id"), owner);
+  if (!existing) return c.json({ error: "not found" }, 404);
+  deleteAgent(db, c.req.param("id"));
   return c.json({ ok: true });
 });
 
@@ -126,8 +142,9 @@ agentsRoute.delete("/:id", (c) => {
  * Only available to authenticated dashboard operator (single-user mode for now).
  */
 agentsRoute.get("/:id/export", async (c) => {
+  const owner = ownerFromContext(c);
   const db = openDb();
-  const agent = getAgent(db, c.req.param("id"));
+  const agent = getAgent(db, c.req.param("id"), owner);
   if (!agent) return c.json({ error: "agent not found" }, 404);
   if (!agent.walletPath) return c.json({ error: "wallet not yet created" }, 400);
   if (!existsSync(agent.walletPath)) return c.json({ error: "wallet file missing on disk" }, 410);
@@ -169,12 +186,13 @@ agentsRoute.get("/:id/export", async (c) => {
  * Body: { amount?: number }  default = env.minWalletBalance
  */
 agentsRoute.post("/:id/fund-from-master", async (c) => {
+  const owner = ownerFromContext(c);
   const db = openDb();
-  const agent = getAgent(db, c.req.param("id"));
+  const agent = getAgent(db, c.req.param("id"), owner);
   if (!agent) return c.json({ error: "agent not found" }, 404);
   if (!agent.walletAddress) return c.json({ error: "agent has no wallet yet" }, 400);
 
-  const masterPath = masterWalletPath();
+  const masterPath = masterWalletPath(owner);
   if (!existsSync(masterPath)) return c.json({ error: "master wallet not imported (go to Settings)" }, 400);
 
   const body = await c.req.json<{ amount?: number }>().catch(() => ({} as { amount?: number }));
@@ -205,6 +223,7 @@ agentsRoute.post("/:id/fund-from-master", async (c) => {
  * Body supports autoFundFromMaster:true which funds before flow if balance < min.
  */
 agentsRoute.post("/:id/run", async (c) => {
+  const owner = ownerFromContext(c);
   const id = c.req.param("id");
   type RunBody = {
     xUsername?: string;
@@ -221,12 +240,12 @@ agentsRoute.post("/:id/run", async (c) => {
   if (isFlowActive(id)) return c.json({ error: "flow already running" }, 409);
 
   const db = openDb();
-  const agent = getAgent(db, id);
+  const agent = getAgent(db, id, owner);
   if (!agent) return c.json({ error: "agent not found" }, 404);
 
   // Pre-flow: auto-fund if requested and master wallet exists and agent has address
   if (body.autoFundFromMaster && agent.walletAddress) {
-    const masterPath = masterWalletPath();
+    const masterPath = masterWalletPath(owner);
     if (existsSync(masterPath)) {
       try {
         const currentBal = await naracli.balance({ walletPath: agent.walletPath ?? "", agentId: agent.agentId });
@@ -260,6 +279,10 @@ agentsRoute.post("/:id/run", async (c) => {
 });
 
 agentsRoute.post("/:id/cancel", (c) => {
+  const owner = ownerFromContext(c);
+  const db = openDb();
+  const existing = getAgent(db, c.req.param("id"), owner);
+  if (!existing) return c.json({ error: "not found" }, 404);
   const ok = cancelFlow(c.req.param("id"));
   return c.json({ ok });
 });

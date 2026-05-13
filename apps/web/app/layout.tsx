@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 import "./globals.css";
+import UserBadge from "../components/user-badge";
+import "./globals.css";
 
 export const metadata = {
   title: "Nara Bot Dashboard",
@@ -48,6 +50,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                 <a key={item.href} href={item.href} className="nav-link nav-link-sm">{item.label}</a>
               ))}
             </nav>
+            <UserBadge />
             <footer className="sidebar-footer">
               <span className="muted">daemon</span>
               <span className="chip chip-live">●  LIVE</span>

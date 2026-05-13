@@ -3,6 +3,7 @@ import { streamSSE } from "hono/streaming";
 import { chatComplete, listModels } from "../ai/provider";
 import { generateTweet } from "../ai/tweet-gen";
 import { appendChatMessage, deleteAllThreads, deleteThread, listThreads, openDb, threadMessages, getAgent } from "@nara-bot/db";
+import { ownerFromContext } from "../lib/owner";
 import { env } from "../lib/env";
 import { runAgentTurn } from "../ai/agent-runtime";
 import { runAgentTurnStream } from "../ai/agent-runtime-stream";
@@ -36,22 +37,26 @@ aiRoute.post("/tweet", async (c) => {
 });
 
 aiRoute.get("/threads", (c) => {
-  const threads = listThreads(openDb());
+  const owner = ownerFromContext(c);
+  const threads = listThreads(openDb(), owner);
   return c.json({ threads });
 });
 
 aiRoute.get("/threads/:id", (c) => {
-  const messages = threadMessages(openDb(), c.req.param("id"));
+  const owner = ownerFromContext(c);
+  const messages = threadMessages(openDb(), c.req.param("id"), 100, owner);
   return c.json({ messages });
 });
 
 aiRoute.delete("/threads/:id", (c) => {
-  const deleted = deleteThread(openDb(), c.req.param("id"));
+  const owner = ownerFromContext(c);
+  const deleted = deleteThread(openDb(), c.req.param("id"), owner);
   return c.json({ ok: true, deleted });
 });
 
 aiRoute.delete("/threads", (c) => {
-  const deleted = deleteAllThreads(openDb());
+  const owner = ownerFromContext(c);
+  const deleted = deleteAllThreads(openDb(), owner);
   return c.json({ ok: true, deleted });
 });
 
@@ -71,14 +76,16 @@ aiRoute.post("/chat", async (c) => {
     return c.json({ error: "threadId and content required" }, 400);
   }
 
+  const owner = ownerFromContext(c);
   const db = openDb();
-  const agent = body.agentDbId ? getAgent(db, body.agentDbId) : null;
+  const agent = body.agentDbId ? getAgent(db, body.agentDbId, owner) : null;
 
   appendChatMessage(db, {
     threadId: body.threadId,
     agentId: agent?.id ?? null,
     role: "user",
     content: body.content,
+    ownerEmail: owner,
   });
 
   const history = threadMessages(db, body.threadId, 40);
@@ -127,14 +134,16 @@ aiRoute.post("/agent", async (c) => {
     return c.json({ error: "threadId and content required" }, 400);
   }
 
+  const owner = ownerFromContext(c);
   const db = openDb();
-  const contextAgent = body.agentDbId ? getAgent(db, body.agentDbId) : null;
+  const contextAgent = body.agentDbId ? getAgent(db, body.agentDbId, owner) : null;
 
   appendChatMessage(db, {
     threadId: body.threadId,
     agentId: contextAgent?.id ?? null,
     role: "user",
     content: body.content,
+    ownerEmail: owner,
   });
 
   const history = threadMessages(db, body.threadId, 40)
@@ -160,6 +169,7 @@ aiRoute.post("/agent", async (c) => {
       agentId: contextAgent?.id ?? null,
       role: "assistant",
       content: formatAgentResponse(finalText, turn.toolCalls),
+      ownerEmail: owner,
     });
 
     return c.json({
@@ -188,14 +198,16 @@ aiRoute.post("/agent/stream", async (c) => {
     return c.json({ error: "threadId and content required" }, 400);
   }
 
+  const owner = ownerFromContext(c);
   const db = openDb();
-  const contextAgent = body.agentDbId ? getAgent(db, body.agentDbId) : null;
+  const contextAgent = body.agentDbId ? getAgent(db, body.agentDbId, owner) : null;
 
   appendChatMessage(db, {
     threadId: body.threadId,
     agentId: contextAgent?.id ?? null,
     role: "user",
     content: body.content,
+    ownerEmail: owner,
   });
 
   const history = threadMessages(db, body.threadId, 40)

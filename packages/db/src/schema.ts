@@ -128,4 +128,17 @@ export const migrationsSql: string[] = [
   "ALTER TABLE automation_settings ADD COLUMN comments_per_poll INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE automation_settings ADD COLUMN follows_per_poll INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE automation_runs ADD COLUMN phase TEXT",
+  // Multi-tenant isolation — owner_email scopes rows to a specific portal user
+  "ALTER TABLE agents ADD COLUMN owner_email TEXT",
+  "ALTER TABLE chat_messages ADD COLUMN owner_email TEXT",
+  "ALTER TABLE dragonball_claims ADD COLUMN owner_email TEXT",
+  "ALTER TABLE automation_settings ADD COLUMN owner_email TEXT",
+  "ALTER TABLE automation_runs ADD COLUMN owner_email TEXT",
+  "ALTER TABLE automation_activity ADD COLUMN owner_email TEXT",
+  "ALTER TABLE flow_runs ADD COLUMN owner_email TEXT",
+  "ALTER TABLE bot_logs ADD COLUMN owner_email TEXT",
+  "CREATE INDEX IF NOT EXISTS idx_agents_owner ON agents(owner_email)",
+  "CREATE INDEX IF NOT EXISTS idx_chat_messages_owner ON chat_messages(owner_email, thread_id, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_automation_settings_owner ON automation_settings(owner_email, key)",
+  "CREATE INDEX IF NOT EXISTS idx_automation_runs_owner ON automation_runs(owner_email, started_at DESC)",
 ];

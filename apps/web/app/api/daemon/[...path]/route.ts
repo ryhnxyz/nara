@@ -15,6 +15,10 @@ async function proxy(req: NextRequest, path: string[]): Promise<Response> {
   if (acceptHeader) forwardHeaders.set("accept", acceptHeader);
   if (contentType) forwardHeaders.set("content-type", contentType);
 
+  // Middleware injects x-owner-email for authenticated users — forward so daemon can scope queries
+  const ownerEmail = req.headers.get("x-owner-email");
+  if (ownerEmail) forwardHeaders.set("x-owner-email", ownerEmail);
+
   const init: RequestInit = {
     method: req.method,
     headers: forwardHeaders,

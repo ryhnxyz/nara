@@ -1,23 +1,26 @@
 import { Hono } from "hono";
-import { existsSync, mkdirSync, chmodSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, chmodSync, unlinkSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { env } from "../lib/env";
 import { log } from "../lib/logger";
 import { naracli, extractTxSignature } from "../naracli/wrapper";
 import { onMasterWalletImported, onMasterWalletRemoved } from "../workers/distribute";
+import { ownerFromContext, ownerMasterWalletPath } from "../lib/owner";
 
 export const masterWalletRoute = new Hono();
 
-function masterPath(): string {
+function masterPath(owner: string | null): string {
+  if (owner) return ownerMasterWalletPath(owner);
   return resolve(env.walletsDir, "..", "master-wallet.json");
 }
 
-function ensureDir() {
-  mkdirSync(dirname(masterPath()), { recursive: true });
+function ensureDir(owner: string | null) {
+  mkdirSync(dirname(masterPath(owner)), { recursive: true });
 }
 
 masterWalletRoute.get("/state", async (c) => {
-  const path = masterPath();
+  const owner = ownerFromContext(c);
+  const path = masterPath(owner);
   const exists = existsSync(path);
   if (!exists) {
     return c.json({ imported: false, address: null, balance: null });
@@ -33,13 +36,14 @@ masterWalletRoute.get("/state", async (c) => {
 });
 
 masterWalletRoute.post("/import", async (c) => {
+  const owner = ownerFromContext(c);
   const body = await c.req.json<{ privateKey?: string; mnemonic?: string }>();
   if (!body.privateKey && !body.mnemonic) {
     return c.json({ error: "provide privateKey or mnemonic" }, 400);
   }
 
-  ensureDir();
-  const path = masterPath();
+  ensureDir(owner);
+  const path = masterPath(owner);
 
   // naracli wallet import writes to the -o path
   const args = ["wallet", "import", "-o", path];
@@ -58,7 +62,7 @@ masterWalletRoute.post("/import", async (c) => {
   const addr = await naracli.address({ walletPath: path });
   const bal = await naracli.balance({ walletPath: path });
 
-  log({ level: "success", scope: "master-wallet", message: `Imported master wallet: ${addr}` });
+  log({ level: "success", scope: "master-wallet", message: `Imported master wallet${owner ? ` for ${owner}` : ""}: ${addr}` });
 
   // Auto-enable sweep worker so funds start flowing to master without manual toggle
   try {
@@ -71,7 +75,8 @@ masterWalletRoute.post("/import", async (c) => {
 });
 
 masterWalletRoute.post("/remove", async (c) => {
-  const path = masterPath();
+  const owner = ownerFromContext(c);
+  const path = masterPath(owner);
   if (existsSync(path)) {
     try {
       unlinkSync(path);
@@ -90,10 +95,11 @@ masterWalletRoute.post("/remove", async (c) => {
  * If amount not provided, uses env.minWalletBalance.
  */
 masterWalletRoute.post("/fund", async (c) => {
+  const owner = ownerFromContext(c);
   const body = await c.req.json<{ targetAddress: string; amount?: number }>();
   if (!body.targetAddress) return c.json({ error: "targetAddress required" }, 400);
 
-  const path = masterPath();
+  const path = masterPath(owner);
   if (!existsSync(path)) return c.json({ error: "master wallet not imported" }, 400);
 
   const amount = body.amount ?? env.minWalletBalance;

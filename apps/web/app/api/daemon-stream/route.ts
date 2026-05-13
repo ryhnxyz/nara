@@ -5,9 +5,13 @@ const DAEMON_URL = process.env.NARA_DAEMON_URL ?? "http://localhost:4000";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET(_req: NextRequest): Promise<Response> {
+export async function GET(req: NextRequest): Promise<Response> {
+  const headers: Record<string, string> = { accept: "text/event-stream" };
+  const ownerEmail = req.headers.get("x-owner-email");
+  if (ownerEmail) headers["x-owner-email"] = ownerEmail;
+
   const upstream = await fetch(`${DAEMON_URL}/api/logs/stream`, {
-    headers: { accept: "text/event-stream" },
+    headers,
     cache: "no-store",
   });
 

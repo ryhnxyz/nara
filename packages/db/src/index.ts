@@ -45,13 +45,17 @@ export function initDb(db = openDb()): void {
 }
 
 // -------- Agents --------
-export function listAgents(db: Db): NaraAgent[] {
-  const rows = db.prepare("SELECT * FROM agents ORDER BY created_at DESC").all() as any[];
+export function listAgents(db: Db, ownerEmail?: string | null): NaraAgent[] {
+  const rows = ownerEmail
+    ? db.prepare("SELECT * FROM agents WHERE owner_email = ? ORDER BY created_at DESC").all(ownerEmail) as any[]
+    : db.prepare("SELECT * FROM agents ORDER BY created_at DESC").all() as any[];
   return rows.map(rowToAgent);
 }
 
-export function getAgent(db: Db, id: string): NaraAgent | null {
-  const row = db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as any;
+export function getAgent(db: Db, id: string, ownerEmail?: string | null): NaraAgent | null {
+  const row = ownerEmail
+    ? db.prepare("SELECT * FROM agents WHERE id = ? AND owner_email = ?").get(id, ownerEmail) as any
+    : db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as any;
   return row ? rowToAgent(row) : null;
 }
 
@@ -62,7 +66,7 @@ export function getAgentByAgentId(db: Db, agentId: string): NaraAgent | null {
 
 export function createAgentRecord(
   db: Db,
-  input: { agentId: string; displayName?: string; referral?: string | null }
+  input: { agentId: string; displayName?: string; referral?: string | null; ownerEmail?: string | null }
 ): NaraAgent {
   const now = nowIso();
   const agent: NaraAgent = {
@@ -80,6 +84,7 @@ export function createAgentRecord(
     totalEarned: 0,
     lastRunAt: null,
     lastRunStatus: null,
+    ownerEmail: input.ownerEmail ?? null,
     createdAt: now,
     updatedAt: now,
   };
@@ -89,13 +94,13 @@ export function createAgentRecord(
       wallet_path, wallet_address, x_username,
       twitter_bound, staked, first_post_done,
       referral, total_earned, last_run_at, last_run_status,
-      created_at, updated_at
+      owner_email, created_at, updated_at
     ) VALUES (
       @id, @agentId, @displayName, @status,
       @walletPath, @walletAddress, @xUsername,
       @twitterBound, @staked, @firstPostDone,
       @referral, @totalEarned, @lastRunAt, @lastRunStatus,
-      @createdAt, @updatedAt
+      @ownerEmail, @createdAt, @updatedAt
     )
   `).run({
     ...agent,
@@ -238,29 +243,43 @@ export interface ChatMessage {
 
 export function appendChatMessage(
   db: Db,
-  input: Omit<ChatMessage, "id" | "createdAt">
+  input: Omit<ChatMessage, "id" | "createdAt"> & { ownerEmail?: string | null }
 ): ChatMessage {
   const msg: ChatMessage = { ...input, id: createId("msg"), createdAt: nowIso() };
   db.prepare(`
-    INSERT INTO chat_messages (id, thread_id, agent_id, role, content, created_at)
-    VALUES (@id, @threadId, @agentId, @role, @content, @createdAt)
-  `).run(msg);
+    INSERT INTO chat_messages (id, thread_id, agent_id, role, content, owner_email, created_at)
+    VALUES (@id, @threadId, @agentId, @role, @content, @ownerEmail, @createdAt)
+  `).run({ ...msg, ownerEmail: (input as any).ownerEmail ?? null });
   return msg;
 }
 
-export function threadMessages(db: Db, threadId: string, limit = 100): ChatMessage[] {
-  const rows = db.prepare(
-    "SELECT * FROM chat_messages WHERE thread_id = ? ORDER BY created_at ASC LIMIT ?"
-  ).all(threadId, limit) as any[];
+export function threadMessages(db: Db, threadId: string, limit = 100, ownerEmail?: string | null): ChatMessage[] {
+  const rows = ownerEmail
+    ? db.prepare(
+        "SELECT * FROM chat_messages WHERE thread_id = ? AND (owner_email = ? OR owner_email IS NULL) ORDER BY created_at ASC LIMIT ?"
+      ).all(threadId, ownerEmail, limit) as any[]
+    : db.prepare(
+        "SELECT * FROM chat_messages WHERE thread_id = ? ORDER BY created_at ASC LIMIT ?"
+      ).all(threadId, limit) as any[];
   return rows.map(rowToMsg);
 }
 
-export function listThreads(db: Db): Array<{ threadId: string; agentId: string | null; lastAt: string; preview: string }> {
-  const rows = db.prepare(`
-    SELECT thread_id, agent_id, MAX(created_at) as last_at,
-           (SELECT content FROM chat_messages m2 WHERE m2.thread_id = m.thread_id ORDER BY created_at DESC LIMIT 1) as preview
-    FROM chat_messages m GROUP BY thread_id ORDER BY last_at DESC LIMIT 100
-  `).all() as any[];
+export function listThreads(
+  db: Db,
+  ownerEmail?: string | null
+): Array<{ threadId: string; agentId: string | null; lastAt: string; preview: string }> {
+  const rows = (ownerEmail
+    ? db.prepare(`
+        SELECT thread_id, agent_id, MAX(created_at) as last_at,
+          (SELECT content FROM chat_messages m2 WHERE m2.thread_id = m.thread_id ORDER BY created_at DESC LIMIT 1) as preview
+        FROM chat_messages m WHERE owner_email = ? OR owner_email IS NULL
+        GROUP BY thread_id ORDER BY last_at DESC LIMIT 100
+      `).all(ownerEmail)
+    : db.prepare(`
+        SELECT thread_id, agent_id, MAX(created_at) as last_at,
+          (SELECT content FROM chat_messages m2 WHERE m2.thread_id = m.thread_id ORDER BY created_at DESC LIMIT 1) as preview
+        FROM chat_messages m GROUP BY thread_id ORDER BY last_at DESC LIMIT 100
+      `).all()) as any[];
   return rows.map((r) => ({
     threadId: r.thread_id,
     agentId: r.agent_id ?? null,
@@ -275,13 +294,17 @@ function snake(s: string): string {
 }
 
 
-export function deleteThread(db: Db, threadId: string): number {
-  const r = db.prepare("DELETE FROM chat_messages WHERE thread_id = ?").run(threadId);
+export function deleteThread(db: Db, threadId: string, ownerEmail?: string | null): number {
+  const r = ownerEmail
+    ? db.prepare("DELETE FROM chat_messages WHERE thread_id = ? AND (owner_email = ? OR owner_email IS NULL)").run(threadId, ownerEmail)
+    : db.prepare("DELETE FROM chat_messages WHERE thread_id = ?").run(threadId);
   return r.changes;
 }
 
-export function deleteAllThreads(db: Db): number {
-  const r = db.prepare("DELETE FROM chat_messages").run();
+export function deleteAllThreads(db: Db, ownerEmail?: string | null): number {
+  const r = ownerEmail
+    ? db.prepare("DELETE FROM chat_messages WHERE owner_email = ? OR owner_email IS NULL").run(ownerEmail)
+    : db.prepare("DELETE FROM chat_messages").run();
   return r.changes;
 }
 
@@ -301,6 +324,7 @@ function rowToAgent(row: any): NaraAgent {
     totalEarned: Number(row.total_earned ?? 0),
     lastRunAt: row.last_run_at ?? null,
     lastRunStatus: row.last_run_status ?? null,
+    ownerEmail: row.owner_email ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -433,7 +457,7 @@ export function patchAutomationSettings(db: Db, key: string, patch: Partial<Auto
 
 export function insertAutomationRun(
   db: Db,
-  input: Omit<AutomationRun, "id" | "startedAt"> & { startedAt?: string }
+  input: Omit<AutomationRun, "id" | "startedAt"> & { startedAt?: string; ownerEmail?: string | null }
 ): AutomationRun {
   const run: AutomationRun = {
     ...input,
@@ -441,23 +465,34 @@ export function insertAutomationRun(
     startedAt: input.startedAt ?? nowIso(),
   };
   db.prepare(`
-    INSERT INTO automation_runs (id, worker, agent_id, started_at, finished_at, status, codes_found, codes_claimed, nara_earned, errors, note)
-    VALUES (@id, @worker, @agentId, @startedAt, @finishedAt, @status, @codesFound, @codesClaimed, @naraEarned, @errors, @note)
-  `).run(run);
+    INSERT INTO automation_runs (id, worker, agent_id, started_at, finished_at, status, codes_found, codes_claimed, nara_earned, errors, note, owner_email)
+    VALUES (@id, @worker, @agentId, @startedAt, @finishedAt, @status, @codesFound, @codesClaimed, @naraEarned, @errors, @note, @ownerEmail)
+  `).run({ ...run, ownerEmail: (input as any).ownerEmail ?? null });
   return run;
 }
 
-export function countAutomationRunsToday(db: Db, worker: string): number {
-  const row = db.prepare(
-    "SELECT COUNT(*) as n FROM automation_runs WHERE worker = ? AND started_at > datetime('now', '-1 day')"
-  ).get(worker) as any;
+export function countAutomationRunsToday(db: Db, worker: string, ownerEmail?: string | null): number {
+  const row = ownerEmail
+    ? db.prepare(
+        "SELECT COUNT(*) as n FROM automation_runs WHERE worker = ? AND owner_email = ? AND started_at > datetime('now', '-1 day')"
+      ).get(worker, ownerEmail) as any
+    : db.prepare(
+        "SELECT COUNT(*) as n FROM automation_runs WHERE worker = ? AND started_at > datetime('now', '-1 day')"
+      ).get(worker) as any;
   return Number(row?.n ?? 0);
 }
 
-export function recentAutomationRuns(db: Db, worker?: string, limit = 50): AutomationRun[] {
-  const rows = worker
-    ? db.prepare("SELECT * FROM automation_runs WHERE worker = ? ORDER BY started_at DESC LIMIT ?").all(worker, limit)
-    : db.prepare("SELECT * FROM automation_runs ORDER BY started_at DESC LIMIT ?").all(limit);
+export function recentAutomationRuns(db: Db, worker?: string, limit = 50, ownerEmail?: string | null): AutomationRun[] {
+  let rows: any[];
+  if (worker && ownerEmail) {
+    rows = db.prepare("SELECT * FROM automation_runs WHERE worker = ? AND owner_email = ? ORDER BY started_at DESC LIMIT ?").all(worker, ownerEmail, limit) as any[];
+  } else if (worker) {
+    rows = db.prepare("SELECT * FROM automation_runs WHERE worker = ? ORDER BY started_at DESC LIMIT ?").all(worker, limit) as any[];
+  } else if (ownerEmail) {
+    rows = db.prepare("SELECT * FROM automation_runs WHERE owner_email = ? ORDER BY started_at DESC LIMIT ?").all(ownerEmail, limit) as any[];
+  } else {
+    rows = db.prepare("SELECT * FROM automation_runs ORDER BY started_at DESC LIMIT ?").all(limit) as any[];
+  }
   return (rows as any[]).map((r) => ({
     id: r.id,
     worker: r.worker,
