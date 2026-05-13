@@ -16,6 +16,7 @@
     "@hono/node-server": "^1.13.7",
     "@nara-bot/core": "workspace:*",
     "@nara-bot/db": "workspace:*",
+    "bs58": "6.0.0",
     "dotenv": "^16.4.7",
     "execa": "^9.5.2",
     "hono": "^4.11.3",

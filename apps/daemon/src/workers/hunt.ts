@@ -11,6 +11,7 @@ import { EventEmitter } from "node:events";
 import {
   openDb,
   listAgents,
+  patchAgent,
   getAutomationSettings,
   patchAutomationSettings,
   insertAutomationRun,
@@ -23,7 +24,7 @@ import {
 } from "@nara-bot/db";
 import { nowIso } from "@nara-bot/core";
 import { log } from "../lib/logger";
-import { agentx, extractTxSignature, extractCodes, type AgentXPost } from "../naracli/wrapper";
+import { agentx, extractTxSignature, extractCodes, extractNaraReward, type AgentXPost } from "../naracli/wrapper";
 
 const WORKER_KEY = "hunt";
 
@@ -306,6 +307,7 @@ export async function runPoll(): Promise<PollResult> {
     const runStart = nowIso();
     let codesFoundForAgent = 0;
     let codesClaimedForAgent = 0;
+    let naraEarnedForAgent = 0;
     let engagementsForAgent = 0;
     let errorsForAgent = 0;
     let note = "";
@@ -357,11 +359,48 @@ export async function runPoll(): Promise<PollResult> {
         });
         if (claim.ok) {
           codesClaimedForAgent++;
+          const txSig = extractTxSignature(claim.stdout);
+
+          // Wait for verifier, then poll `code status` to get real reward.
+          // Claim stdout only says "Waiting for verifier approval...", no reward yet.
+          const eggId = code.split(".")[0];
+          let rewardNara = 0;
+          let rewardRaw: string | null = null;
+          for (let attempt = 0; attempt < 8; attempt++) {
+            await new Promise((r) => setTimeout(r, attempt === 0 ? 3_000 : 5_000));
+            const statusR = await agentx.codeStatus(eggId, {
+              walletPath: agent.walletPath!,
+              agentId: agent.agentId,
+              timeoutMs: 30_000,
+            });
+            if (!statusR.ok) continue;
+            const out = statusR.stdout;
+            // Stop polling once status is terminal
+            if (!/pending/i.test(out)) {
+              // Parse "Reward: N Points" or "Reward: N.N NARA"
+              const nara = extractNaraReward(out);
+              if (nara !== null) rewardNara = nara;
+              const m = out.match(/Reward[:\s]*([\d.]+\s*(?:NARA|Points|Boost credits))/i);
+              if (m) rewardRaw = m[1].trim();
+              break;
+            }
+          }
+
+          if (rewardNara > 0) {
+            naraEarnedForAgent += rewardNara;
+            try {
+              const fresh = listAgents(db).find((a) => a.id === agent.id);
+              const currentTotal = Number(fresh?.totalEarned ?? agent.totalEarned ?? 0);
+              patchAgent(db, agent.id, { totalEarned: Number((currentTotal + rewardNara).toFixed(6)) });
+            } catch {}
+          }
+
           updateDragonBallClaim(db, agent.id, code, {
             status: runtime.tweetBoostUrl ? "boosted" : "claimed",
-            txSignature: extractTxSignature(claim.stdout),
+            txSignature: txSig,
             tweetUrl: runtime.tweetBoostUrl ?? null,
             claimedAt: nowIso(),
+            rewardHint: rewardRaw,
           });
         } else {
           errorsForAgent++;
@@ -408,13 +447,14 @@ export async function runPoll(): Promise<PollResult> {
       status: errorsForAgent > 0 && codesClaimedForAgent === 0 ? "error" : codesFoundForAgent + engagementsForAgent > 0 ? "ok" : "skipped",
       codesFound: codesFoundForAgent,
       codesClaimed: codesClaimedForAgent,
-      naraEarned: 0,
+      naraEarned: Number(naraEarnedForAgent.toFixed(6)),
       errors: errorsForAgent,
       note: note || (engagementsForAgent > 0 ? `engaged=${engagementsForAgent}` : null),
     });
 
     total.codesFound += codesFoundForAgent;
     total.codesClaimed += codesClaimedForAgent;
+    total.naraEarned += naraEarnedForAgent;
     total.engagements += engagementsForAgent;
     total.errors += errorsForAgent;
     runtime.totalRuns++;
@@ -428,6 +468,7 @@ export async function runPoll(): Promise<PollResult> {
   runtime.lastError = total.errors > 0 ? `${total.errors} error(s) this poll` : null;
   runtime.totalCodesFound += total.codesFound;
   runtime.totalCodesClaimed += total.codesClaimed;
+  runtime.totalNaraEarned += total.naraEarned;
   runtime.totalEngagements += total.engagements;
   runtime.running = false;
   ticking = false;

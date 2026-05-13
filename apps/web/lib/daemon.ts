@@ -22,6 +22,10 @@ export const daemon = {
   patchAgent: (id: string, patch: any) =>
     request<any>(`/api/agents/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteAgent: (id: string) => request<any>(`/api/agents/${id}`, { method: "DELETE" }),
+  exportAgentWallet: (id: string) =>
+    request<{ agentId: string; publicKey: string; privateKey: string; keypairJson: number[]; warning: string }>(
+      `/api/agents/${id}/export`
+    ),
   runFlow: (id: string, opts?: any) =>
     request<any>(`/api/agents/${id}/run`, { method: "POST", body: JSON.stringify(opts ?? {}) }),
   cancelFlow: (id: string) =>

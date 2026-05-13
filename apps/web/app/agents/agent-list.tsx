@@ -74,6 +74,48 @@ export function AgentList({ initialAgents }: Props) {
     );
   }
 
+  async function exportWallet(agent: Agent) {
+    const ok = window.confirm(
+      `⚠ SECURITY WARNING ⚠
+
+You are about to reveal the PRIVATE KEY for "${agent.agentId}".
+
+Anyone with this key can drain the wallet.
+Never share it, never paste in chat/DM, never commit to git.
+
+Continue?`
+    );
+    if (!ok) return;
+    try {
+      const res = await fetch(`/api/daemon/agents/${agent.id}/export`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? res.statusText);
+      // Open a modal-like prompt chain
+      const pk = data.privateKey as string;
+      const pub = data.publicKey as string;
+      const keypair = JSON.stringify(data.keypairJson);
+      const choice = window.prompt(
+        `Wallet for: ${agent.agentId}
+Address: ${pub}
+
+Select export format (type number):
+  1 = Private key (base58) — for Phantom/Solflare
+  2 = Keypair JSON array — for naracli
+  3 = Cancel`,
+        "1"
+      );
+      if (choice === "1") {
+        await navigator.clipboard.writeText(pk).catch(() => {});
+        window.prompt("Private key (base58) — copied to clipboard:", pk);
+      } else if (choice === "2") {
+        await navigator.clipboard.writeText(keypair).catch(() => {});
+        window.prompt("Keypair JSON — copied to clipboard:", keypair);
+      }
+    } catch (err) {
+      setMessage(`Export error: ${(err as Error).message}`);
+    }
+  }
+
   if (agents.length === 0) {
     return (
       <section className="panel">
@@ -156,6 +198,15 @@ export function AgentList({ initialAgents }: Props) {
                       onClick={() => setExpanded(expanded === a.id ? null : a.id)}
                     >
                       {expanded === a.id ? "hide" : "steps"}
+                    </button>
+                    <button
+                      className="btn"
+                      onClick={() => exportWallet(a)}
+                      disabled={!a.walletAddress}
+                      title="Export wallet private key / keypair"
+                      style={{ color: "var(--warn)" }}
+                    >
+                      🔑 export
                     </button>
                   </div>
                 </td>

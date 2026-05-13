@@ -116,6 +116,54 @@ agentsRoute.delete("/:id", (c) => {
 });
 
 /**
+ * GET /api/agents/:id/export
+ * Export wallet keypair for an agent. Returns:
+ *   - privateKey (base58) — single-line, ready to paste
+ *   - publicKey (address)
+ *   - keypairJson — raw Solana-style [byte,byte,...] array
+ *
+ * SECURITY: This returns SECRETS. Client MUST warn user before displaying.
+ * Only available to authenticated dashboard operator (single-user mode for now).
+ */
+agentsRoute.get("/:id/export", async (c) => {
+  const db = openDb();
+  const agent = getAgent(db, c.req.param("id"));
+  if (!agent) return c.json({ error: "agent not found" }, 404);
+  if (!agent.walletPath) return c.json({ error: "wallet not yet created" }, 400);
+  if (!existsSync(agent.walletPath)) return c.json({ error: "wallet file missing on disk" }, 410);
+
+  try {
+    const raw = (await import("node:fs")).readFileSync(agent.walletPath, "utf8");
+    const bytes = JSON.parse(raw) as number[];
+    if (!Array.isArray(bytes) || bytes.length !== 64) {
+      return c.json({ error: "unexpected wallet format" }, 500);
+    }
+    const secretKey = new Uint8Array(bytes);
+    // base58 encode the full 64-byte secret key — standard export format used by phantom/solflare
+    const { default: bs58 } = await import("bs58");
+    const privateKey = bs58.encode(secretKey);
+    const publicKey = agent.walletAddress ?? "unknown";
+
+    log({
+      agentId: agent.id,
+      level: "warn",
+      scope: "agents.export",
+      message: `Wallet exported for ${agent.agentId} (operator action)`,
+    });
+
+    return c.json({
+      agentId: agent.agentId,
+      publicKey,
+      privateKey,
+      keypairJson: bytes,
+      warning: "KEEP THIS SECRET. Anyone with this key can drain the wallet.",
+    });
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 500);
+  }
+});
+
+/**
  * POST /api/agents/:id/fund-from-master
  * Transfer from the master wallet to this agent's wallet.
  * Body: { amount?: number }  default = env.minWalletBalance

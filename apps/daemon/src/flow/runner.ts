@@ -306,12 +306,30 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
         });
       } catch {}
 
-      // 1. Create post on AgentX
-      const postR = await agentx.post(postContent, { walletPath: wallet.path, agentId: agent.agentId, timeoutMs: 120_000 });
+      // 1. Create post on AgentX using JSON output for deterministic post-id extraction
+      const postR = await agentx.raw(
+        ["-j", "post", postContent],
+        { walletPath: wallet.path, agentId: agent.agentId, timeoutMs: 120_000, logScope: "agentx.post" }
+      );
       if (!postR.ok) return { status: "error", message: `post failed: ${postR.stderr.slice(0, 200)}` };
-      const postIdMatch = postR.stdout.match(/post[ _-]?id["':\s]*(\d{1,12})/i) || postR.stdout.match(/#(\d{3,})/);
-      const postId = postIdMatch ? postIdMatch[1] : null;
-      if (!postId) return { status: "error", message: "could not parse post id from stdout" };
+
+      let postId: string | null = null;
+      try {
+        const jsonStart = postR.stdout.search(/[\[{]/);
+        if (jsonStart >= 0) {
+          const parsed = JSON.parse(postR.stdout.slice(jsonStart)) as any;
+          const raw = parsed?.postId ?? parsed?.id ?? parsed?.post?.id ?? parsed?.data?.postId ?? parsed?.data?.id ?? null;
+          if (raw !== null && raw !== undefined) postId = String(raw);
+        }
+      } catch {}
+      if (!postId) {
+        const m = postR.stdout.match(/"postId"\s*:\s*"?(\d+)/i)
+          || postR.stdout.match(/"id"\s*:\s*"?(\d+)/i)
+          || postR.stdout.match(/post[ _-]?id["':\s]*(\d{1,12})/i)
+          || postR.stdout.match(/#(\d{3,})/);
+        if (m) postId = m[1]!;
+      }
+      if (!postId) return { status: "error", message: "could not parse post id", meta: { stdoutTail: postR.stdout.slice(-400) } };
 
       // 2. Submit campaign 0 with post ID + tweet URL (reuse bind tweet URL since #AgentXPost is required in tweet)
       const tweetUrl = opts.dailyTweetUrl || bindUrl;
