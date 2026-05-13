@@ -258,18 +258,49 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
     };
   });
 
-  // Step 9: first-post-campaign (skill-driven, best-effort)
+  // Step 9: first-post-campaign — AgentX campaign id 0, requires a post and a tweet URL.
+  // Done AFTER Dragon Ball claims because boost credits help on subsequent campaigns.
   if (!opts.skipFirstPost) {
     await record("first-post-campaign", async () => {
       if (agent.firstPostDone) return { status: "skipped", message: "already done" };
-      // Install skill if missing, then emit guidance. Full automation of the
-      // skill requires interactive agent-level posting — out of scope for
-      // the daemon's shell wrapper. We mark guidance as "running" until user
-      // completes manually, then re-runs this step.
-      await naracli.skillsAdd("agentx-first-post-campaign", { timeoutMs: 180_000 });
+      // Check if already submitted
+      const statusR = await agentx.campaignStatus(0, { walletPath: wallet.path, agentId: agent.agentId, timeoutMs: 60_000 });
+      if (statusR.ok && /claimed|submitted/i.test(statusR.stdout)) {
+        patchAgent(db, agent.id, { firstPostDone: true });
+        return { status: "skipped", message: "already submitted/claimed" };
+      }
+
+      // Generate post content via AI
+      let postContent = `Decentralized agents earning NARA through intelligence. #AgentX #NaraChain`;
+      try {
+        postContent = await generateTweet({
+          agentId: agent.agentId,
+          topic: "being a new AI agent on AgentX, plugging into the Nara chain economy",
+          includeDragonBallTags: false,
+        });
+      } catch {}
+
+      // 1. Create post on AgentX
+      const postR = await agentx.post(postContent, { walletPath: wallet.path, agentId: agent.agentId, timeoutMs: 120_000 });
+      if (!postR.ok) return { status: "error", message: `post failed: ${postR.stderr.slice(0, 200)}` };
+      const postIdMatch = postR.stdout.match(/post[ _-]?id["':\s]*(\d{1,12})/i) || postR.stdout.match(/#(\d{3,})/);
+      const postId = postIdMatch ? postIdMatch[1] : null;
+      if (!postId) return { status: "error", message: "could not parse post id from stdout" };
+
+      // 2. Submit campaign 0 with post ID + tweet URL (reuse bind tweet URL since #AgentXPost is required in tweet)
+      const tweetUrl = opts.dailyTweetUrl || bindUrl;
+      const submitR = await agentx.raw(
+        ["campaign", "submit", "0", "--post-id", postId, "--tweet-url", tweetUrl, "--relay"],
+        { walletPath: wallet.path, agentId: agent.agentId, timeoutMs: 180_000, logScope: "agentx.campaign.submit" }
+      );
+      if (!submitR.ok) {
+        return { status: "error", message: submitR.stderr.slice(0, 200) || "campaign submit failed" };
+      }
+      patchAgent(db, agent.id, { firstPostDone: true });
       return {
-        status: "skipped",
-        message: "Install skill OK. Run 'npx naracli skills add agentx-first-post-campaign' in your agent CLI then trigger the campaign. This daemon does not post AgentX content autonomously.",
+        status: "success",
+        message: `posted id=${postId} · submitted campaign 0 (10 NARA)`,
+        meta: { postId, tx: extractTxSignature(submitR.stdout) },
       };
     });
   }
