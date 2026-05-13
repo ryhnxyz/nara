@@ -41,11 +41,13 @@ function sortedStringify(obj: unknown): string {
   );
 }
 
+
 /**
- * Signature for /api/gateway/init (v2 session handle flow).
- * Matches docs exactly:
- *   payload = `${timestamp}${api_key}${sha256(JSON.stringify(sortedBody))}`
- *   sign    = HMAC-SHA256(signing_secret, payload) hex
+ * Unified signature for ALL portal endpoints.
+ * Canonical payload (per portal server/security.ts validator):
+ *   payload = `${timestamp}.${apiKey}.${sha256(sortedStringify(body))}`
+ *   sign    = HMAC-SHA256(signing_secret, payload).hex
+ * Timestamp is in SECONDS.
  */
 export function signGatewayInit(
   apiKey: string,
@@ -54,7 +56,7 @@ export function signGatewayInit(
   timestamp: number,
 ): string {
   const bodyHash = crypto.createHash("sha256").update(sortedStringify(body)).digest("hex");
-  const payload = `${timestamp}${apiKey}${bodyHash}`;
+  const payload = `${timestamp}.${apiKey}.${bodyHash}`;
   return crypto.createHmac("sha256", signingSecret).update(payload).digest("hex");
 }
 
