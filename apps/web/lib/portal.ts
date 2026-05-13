@@ -77,18 +77,51 @@ export function signServerRequest(
   return { timestamp, sign };
 }
 
+/**
+ * Pull the real end-user IP from incoming request headers.
+ * We use this to forward X-Forwarded-For to the portal so its IP-based rate limiter
+ * charges the actual user, not our VPS.
+ */
+export function clientIpFromHeaders(headers: Headers): string | null {
+  const xff = headers.get("x-forwarded-for");
+  if (xff) {
+    const first = xff.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  const real = headers.get("x-real-ip");
+  if (real) return real.trim();
+  const cf = headers.get("cf-connecting-ip");
+  if (cf) return cf.trim();
+  return null;
+}
+
+function buildForwardHeaders(clientIp?: string | null, clientUa?: string | null): HeadersInit {
+  const h: Record<string, string> = { "Content-Type": "application/json" };
+  if (clientIp) {
+    h["X-Forwarded-For"] = clientIp;
+    h["X-Real-IP"] = clientIp;
+    h["CF-Connecting-IP"] = clientIp;
+  }
+  if (clientUa) h["User-Agent"] = clientUa;
+  return h;
+}
+
 /** Initialize a gateway session handle and return the URL user should be redirected to. */
-export async function initGatewaySession(redirectUri: string, state: string): Promise<string> {
+export async function initGatewaySession(
+  redirectUri: string,
+  state: string,
+  clientIp?: string | null,
+  clientUa?: string | null,
+): Promise<string> {
   const apiKey = portalApiKey();
   const signingSecret = portalSigningSecret();
   const body = { app_name: PORTAL_APP_NAME, redirect_uri: redirectUri, state };
-  // Portal validates timestamps in SECONDS (not ms). Sending ms trips timestamp_expired.
   const timestamp = Math.floor(Date.now() / 1000);
   const sign = signGatewayInit(apiKey, signingSecret, body, timestamp);
 
   const r = await fetch(`${PORTAL_BASE_URL}/api/gateway/init`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: buildForwardHeaders(clientIp, clientUa),
     body: JSON.stringify({ api_key: apiKey, ...body, timestamp, sign }),
     cache: "no-store",
   });
