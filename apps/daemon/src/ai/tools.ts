@@ -17,6 +17,7 @@ import { isValidAgentId, sanitizeAgentId } from "@nara-bot/core";
 import { naracli, agentx, extractTxSignature } from "../naracli/wrapper";
 import { runFullFlow, isFlowActive, cancelFlow } from "../flow/runner";
 import { getDistributeState, runDistribution, configureDistribute } from "../workers/distribute";
+import { getHuntState, configureHunt, runPoll as runHuntPoll, listHuntRuns } from "../workers/hunt";
 import { env } from "../lib/env";
 import { generateTweet } from "./tweet-gen";
 
@@ -570,6 +571,68 @@ export const TOOLS: AgentTool[] = [
         timeoutMs: 180_000,
       });
       return { ok: r.ok, amount: sendable, tx: extractTxSignature(r.stdout) };
+    },
+  },
+
+  // ==================== Automation (Dragon Ball Hunt Worker) ====================
+
+  {
+    name: "get_hunt_worker_state",
+    description: "Get state of the Dragon Ball hunt automation worker: enabled/running, interval, counts, last poll, target agents.",
+    parameters: { type: "object", properties: {} },
+    handler: async () => getHuntState(),
+  },
+
+  {
+    name: "configure_hunt_worker",
+    description: "Configure and control the Dragon Ball hunt worker. Setting enabled:true starts the 24/7 polling loop; enabled:false stops it.",
+    parameters: {
+      type: "object",
+      properties: {
+        enabled: { type: "boolean", description: "turn worker on/off" },
+        intervalSeconds: { type: "number", description: "polling interval, min 30" },
+        autoClaim: { type: "boolean", description: "auto-claim any codes found (vs. discover-only)" },
+        tweetBoostUrl: { type: "string", description: "optional X tweet URL applied to every claim for 2x boost" },
+        targetAgentIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "limit to these agent DB ids; omit/empty = all eligible",
+        },
+        maxRunsPerDay: { type: "number", description: "safety cap across whole worker" },
+      },
+    },
+    handler: async (args) => {
+      const patch: any = {};
+      if (args.enabled !== undefined) patch.enabled = !!args.enabled;
+      if (args.intervalSeconds !== undefined) patch.intervalSeconds = Math.max(30, Number(args.intervalSeconds));
+      if (args.autoClaim !== undefined) patch.autoClaim = !!args.autoClaim;
+      if (args.tweetBoostUrl !== undefined) patch.tweetBoostUrl = args.tweetBoostUrl ? String(args.tweetBoostUrl) : null;
+      if (Array.isArray(args.targetAgentIds)) patch.targetAgentIds = (args.targetAgentIds as string[]).length ? args.targetAgentIds : null;
+      if (args.maxRunsPerDay !== undefined) patch.maxRunsPerDay = Math.max(1, Number(args.maxRunsPerDay));
+      return configureHunt(patch);
+    },
+  },
+
+  {
+    name: "run_hunt_poll_now",
+    description: "Trigger one Dragon Ball hunt poll immediately (check DM inbox for all eligible agents, auto-claim if enabled). Returns { codesFound, codesClaimed, errors }.",
+    parameters: { type: "object", properties: {} },
+    handler: async () => {
+      const res = await runHuntPoll();
+      return { ...res, state: getHuntState() };
+    },
+  },
+
+  {
+    name: "list_hunt_runs",
+    description: "List recent hunt worker runs (per-agent polls) for monitoring.",
+    parameters: {
+      type: "object",
+      properties: { limit: { type: "number" } },
+    },
+    handler: async (args) => {
+      const runs = listHuntRuns(Number(args.limit ?? 30));
+      return { runs, count: runs.length };
     },
   },
 ];
