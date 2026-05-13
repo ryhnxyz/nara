@@ -16,6 +16,7 @@ import { openAITools, runTool, TOOL_MAP, type ToolContext } from "./tools";
 
 export type StreamEvent =
   | { type: "text-delta"; delta: string }
+  | { type: "reasoning-delta"; delta: string }
   | { type: "tool-call-start"; id: string; name: string; args: Record<string, unknown> }
   | { type: "tool-call-result"; id: string; name: string; ok: boolean; result?: unknown; error?: string; durationMs: number }
   | { type: "step-end"; step: number; finishReason: string | null }
@@ -139,6 +140,16 @@ export async function* runAgentTurnStream(
           if (typeof delta.content === "string" && delta.content.length > 0) {
             stepText += delta.content;
             yield { type: "text-delta", delta: delta.content };
+          }
+          // Claude Opus 4.7 reasoning stream (via opencode router)
+          const reasoningDelta =
+            (typeof delta.reasoning_content === "string" && delta.reasoning_content) ||
+            (typeof delta.reasoning === "string" && delta.reasoning) ||
+            (delta.reasoning && typeof delta.reasoning.content === "string" && delta.reasoning.content) ||
+            (Array.isArray(delta.reasoning_details) && delta.reasoning_details[0]?.text) ||
+            "";
+          if (reasoningDelta) {
+            yield { type: "reasoning-delta", delta: reasoningDelta };
           }
           if (Array.isArray(delta.tool_calls)) {
             for (const tc of delta.tool_calls) {

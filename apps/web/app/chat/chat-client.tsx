@@ -42,6 +42,8 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
   const [mode, setMode] = useState<Mode>("agent");
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamText, setStreamText] = useState("");
+  const [reasoningText, setReasoningText] = useState("");
+  const [reasoningOpen, setReasoningOpen] = useState(true);
   const [toolCalls, setToolCalls] = useState<ToolCallLive[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -55,7 +57,7 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamText, toolCalls]);
+  }, [messages, streamText, toolCalls, reasoningText]);
 
   async function loadThread(id: string) {
     try {
@@ -83,6 +85,8 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
     setStreaming(true);
     setError(null);
     setStreamText("");
+    setReasoningText("");
+    setReasoningOpen(true);
     setToolCalls([]);
 
     const optimistic: Message = {
@@ -146,6 +150,9 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
             case "text-delta":
               setStreamText((t) => t + (payload.delta ?? ""));
               break;
+            case "reasoning-delta":
+              setReasoningText((t) => t + (payload.delta ?? ""));
+              break;
             case "tool-call-start":
               setToolCalls((prev) => [
                 ...prev,
@@ -167,6 +174,7 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
               await refreshThreads();
               await loadThread(activeThread);
               setStreamText("");
+              setReasoningText("");
               break;
             case "error":
               throw new Error(payload.message ?? "stream error");
@@ -512,6 +520,23 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
                 </span>
                 <span className="status-pulse"> memproses permintaan…</span>
               </div>
+            </div>
+          )}
+
+          {reasoningText && (
+            <div className="msg-appear" style={{ marginBottom: 12, paddingBottom: 10, borderBottom: "1px dashed var(--border)" }}>
+              <div
+                onClick={() => setReasoningOpen((v) => !v)}
+                style={{ fontSize: 9, letterSpacing: "0.22em", color: "var(--info)", marginBottom: 6, cursor: "pointer", userSelect: "none" }}
+              >
+                {reasoningOpen ? "▾" : "▸"} REASONING {streaming && <span className="phase-badge phase-badge-thinking"><span className="spinner"></span> THINKING</span>}
+              </div>
+              {reasoningOpen && (
+                <div style={{ whiteSpace: "pre-wrap", fontSize: 11, lineHeight: 1.6, color: "var(--text-dim)", fontStyle: "italic", opacity: 0.85, paddingLeft: 8, borderLeft: "2px solid var(--info)" }}>
+                  {reasoningText}
+                  {streaming && !streamText && <span className="stream-cursor"></span>}
+                </div>
+              )}
             </div>
           )}
 
