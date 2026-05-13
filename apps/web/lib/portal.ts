@@ -80,7 +80,8 @@ export async function initGatewaySession(redirectUri: string, state: string): Pr
   const apiKey = portalApiKey();
   const signingSecret = portalSigningSecret();
   const body = { app_name: PORTAL_APP_NAME, redirect_uri: redirectUri, state };
-  const timestamp = Date.now();
+  // Portal validates timestamps in SECONDS (not ms). Sending ms trips timestamp_expired.
+  const timestamp = Math.floor(Date.now() / 1000);
   const sign = signGatewayInit(apiKey, signingSecret, body, timestamp);
 
   const r = await fetch(`${PORTAL_BASE_URL}/api/gateway/init`, {
