@@ -234,7 +234,7 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
         </div>
         <button
           className="btn btn-primary"
-          style={{ width: "100%", marginBottom: 12 }}
+          style={{ width: "100%", marginBottom: 6 }}
           onClick={() => {
             const id = createThreadId();
             setActiveThread(id);
@@ -245,34 +245,93 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
         >
           + New chat
         </button>
+        {threads.length > 0 && (
+          <button
+            className="btn btn-danger"
+            style={{ width: "100%", marginBottom: 12, fontSize: 10 }}
+            onClick={async () => {
+              if (!confirm(`Delete ALL ${threads.length} threads? This cannot be undone.`)) return;
+              await fetch("/api/daemon/ai/threads", { method: "DELETE" });
+              await refreshThreads();
+              const id = createThreadId();
+              setActiveThread(id);
+              setMessages([]);
+              setToolCalls([]);
+              setStreamText("");
+            }}
+          >
+            Clear all ({threads.length})
+          </button>
+        )}
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {threads.length === 0 ? (
             <div className="hint">No threads yet.</div>
           ) : (
             threads.map((t) => (
-              <button
+              <div
                 key={t.threadId}
-                onClick={() => setActiveThread(t.threadId)}
                 style={{
-                  textAlign: "left",
+                  display: "flex",
+                  alignItems: "stretch",
+                  gap: 4,
                   background: activeThread === t.threadId ? "var(--accent-soft)" : "transparent",
                   border: "1px solid var(--border)",
                   borderLeft: activeThread === t.threadId ? "2px solid var(--accent)" : "2px solid transparent",
-                  color: "var(--text)",
-                  padding: "8px 10px",
                   borderRadius: 4,
-                  fontSize: 11,
-                  cursor: "pointer",
                 }}
               >
-                <div style={{ fontWeight: 700 }}>{t.threadId.slice(-10)}</div>
-                <div
-                  className="muted"
-                  style={{ fontSize: 10, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                <button
+                  onClick={() => setActiveThread(t.threadId)}
+                  style={{
+                    flex: 1,
+                    textAlign: "left",
+                    background: "transparent",
+                    border: "none",
+                    color: "var(--text)",
+                    padding: "8px 10px",
+                    fontSize: 11,
+                    cursor: "pointer",
+                    overflow: "hidden",
+                  }}
                 >
-                  {t.preview}
-                </div>
-              </button>
+                  <div style={{ fontWeight: 700 }}>{t.threadId.slice(-10)}</div>
+                  <div
+                    className="muted"
+                    style={{ fontSize: 10, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                  >
+                    {t.preview}
+                  </div>
+                </button>
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (!confirm(`Delete thread ${t.threadId.slice(-10)}?`)) return;
+                    await fetch(`/api/daemon/ai/threads/${t.threadId}`, { method: "DELETE" });
+                    await refreshThreads();
+                    if (activeThread === t.threadId) {
+                      const id = createThreadId();
+                      setActiveThread(id);
+                      setMessages([]);
+                      setToolCalls([]);
+                      setStreamText("");
+                    }
+                  }}
+                  title="Delete thread"
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    color: "var(--text-dim)",
+                    cursor: "pointer",
+                    padding: "0 8px",
+                    fontSize: 14,
+                    borderLeft: "1px solid var(--border)",
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = "var(--danger)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-dim)")}
+                >
+                  ×
+                </button>
+              </div>
             ))
           )}
         </div>

@@ -274,6 +274,17 @@ function snake(s: string): string {
   return s.replace(/[A-Z]/g, (m) => "_" + m.toLowerCase());
 }
 
+
+export function deleteThread(db: Db, threadId: string): number {
+  const r = db.prepare("DELETE FROM chat_messages WHERE thread_id = ?").run(threadId);
+  return r.changes;
+}
+
+export function deleteAllThreads(db: Db): number {
+  const r = db.prepare("DELETE FROM chat_messages").run();
+  return r.changes;
+}
+
 function rowToAgent(row: any): NaraAgent {
   return {
     id: row.id,

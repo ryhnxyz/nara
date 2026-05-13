@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { chatComplete, listModels } from "../ai/provider";
 import { generateTweet } from "../ai/tweet-gen";
-import { appendChatMessage, listThreads, openDb, threadMessages, getAgent } from "@nara-bot/db";
+import { appendChatMessage, deleteAllThreads, deleteThread, listThreads, openDb, threadMessages, getAgent } from "@nara-bot/db";
 import { env } from "../lib/env";
 import { runAgentTurn } from "../ai/agent-runtime";
 import { runAgentTurnStream } from "../ai/agent-runtime-stream";
@@ -43,6 +43,16 @@ aiRoute.get("/threads", (c) => {
 aiRoute.get("/threads/:id", (c) => {
   const messages = threadMessages(openDb(), c.req.param("id"));
   return c.json({ messages });
+});
+
+aiRoute.delete("/threads/:id", (c) => {
+  const deleted = deleteThread(openDb(), c.req.param("id"));
+  return c.json({ ok: true, deleted });
+});
+
+aiRoute.delete("/threads", (c) => {
+  const deleted = deleteAllThreads(openDb());
+  return c.json({ ok: true, deleted });
 });
 
 /**
