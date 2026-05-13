@@ -37,7 +37,7 @@ type Mode = "agent" | "chat";
 export function ChatClient({ threads: initThreads, models, agents }: Props) {
   const [threads, setThreads] = useState(initThreads);
   const [activeThread, setActiveThread] = useState<string>(() => createThreadId());
-  const [agentDbId, setAgentDbId] = useState<string>(agents[0]?.id ?? "");
+  const [agentDbId, setAgentDbId] = useState<string>(""); // "" = GLOBAL mode (AI iterates all agents)
   const FIXED_MODEL = "kiro/claude-opus-4.7";
   const [mode, setMode] = useState<Mode>("agent");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -379,12 +379,13 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
               className="select"
               value={agentDbId}
               onChange={(e) => setAgentDbId(e.target.value)}
-              style={{ width: 160 }}
+              style={{ width: 180 }}
+              title={agentDbId ? "AI will focus on this agent" : "GLOBAL mode — AI can work on any/all agents"}
             >
-              <option value="">(no context)</option>
+              <option value="">🌐 Global (all agents)</option>
               {agents.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.agentId}
+                  @ {a.agentId}
                 </option>
               ))}
             </select>
@@ -411,12 +412,20 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
             <div className="hint" style={{ padding: 14 }}>
               {mode === "agent" ? (
                 <>
-                  <strong style={{ color: "var(--accent)" }}>Agent mode (streaming)</strong> — AI has access to all bot tools. Try:{" "}
-                  <em>"farm NARA for agent ryhn-nara-01"</em> or{" "}
-                  <em>"check dm inbox for all agents and claim any balls"</em>.
+                  <strong style={{ color: "var(--accent)" }}>Agent mode — streaming, global</strong>
+                  <br />
+                  AI can run tasks across ALL agents simultaneously. Try:
+                  <ul style={{ margin: "8px 0 0 16px", padding: 0, lineHeight: 1.8 }}>
+                    <li><em>"kerjain first post campaign semua agent"</em></li>
+                    <li><em>"run_flow semua agent yang belum firstPostDone"</em></li>
+                    <li><em>"hunt dragon ball aktifin"</em></li>
+                    <li><em>"cek balance semua agent"</em></li>
+                  </ul>
                 </>
               ) : (
-                <>Chat mode — plain Q&A without tools. Agent context is injected for better answers.</>
+                <>
+                  <strong>Chat mode</strong> — plain Q&A without tools. Use this to ask questions about Nara or the dashboard.
+                </>
               )}
             </div>
           ) : (
@@ -492,21 +501,32 @@ export function ChatClient({ threads: initThreads, models, agents }: Props) {
             </div>
           )}
 
-          {streamText && (
-            <div style={{ marginBottom: 14, paddingBottom: 12, borderBottom: "1px solid var(--border)" }}>
-              <div
-                style={{
-                  fontSize: 9,
-                  letterSpacing: "0.22em",
-                  color: "var(--accent)",
-                  marginBottom: 4,
-                }}
-              >
-                ASSISTANT · streaming…
+          {streaming && !streamText && toolCalls.length === 0 && (
+            <div className="msg-appear" style={{ padding: "14px 0", borderBottom: "1px solid var(--border)", marginBottom: 14 }}>
+              <div style={{ fontSize: 9, letterSpacing: "0.22em", color: "var(--info)", marginBottom: 6 }}>
+                ASSISTANT · <span className="phase-badge phase-badge-thinking"><span className="spinner"></span> THINKING</span>
               </div>
-              <div style={{ whiteSpace: "pre-wrap", fontSize: 12, lineHeight: 1.6 }}>
+              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                <span className="thinking-dots">
+                  <span></span><span></span><span></span>
+                </span>
+                <span className="status-pulse"> memproses permintaan…</span>
+              </div>
+            </div>
+          )}
+
+          {streamText && (
+            <div className="msg-appear" style={{ marginBottom: 14, paddingBottom: 12, borderBottom: "1px solid var(--border)" }}>
+              <div style={{ fontSize: 9, letterSpacing: "0.22em", color: "var(--accent)", marginBottom: 6 }}>
+                ASSISTANT · {streaming ? (
+                  <span className="phase-badge phase-badge-writing"><span className="spinner"></span> WRITING</span>
+                ) : (
+                  <span className="phase-badge phase-badge-done">✓ DONE</span>
+                )}
+              </div>
+              <div style={{ whiteSpace: "pre-wrap", fontSize: 12, lineHeight: 1.7 }}>
                 {streamText}
-                <span style={{ opacity: 0.5 }}>▊</span>
+                {streaming && <span className="stream-cursor"></span>}
               </div>
             </div>
           )}

@@ -208,10 +208,11 @@ export interface PollResult {
   codesClaimed: number;
   engagements: number;
   errors: number;
+  naraEarned: number;
 }
 
 export async function runPoll(): Promise<PollResult> {
-  if (ticking) return { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0 };
+  if (ticking) return { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0, naraEarned: 0 };
   ticking = true;
   runtime.running = true;
   runtime.nextPollAt = new Date(Date.now() + runtime.intervalSeconds * 1000).toISOString();
@@ -225,7 +226,7 @@ export async function runPoll(): Promise<PollResult> {
     runtime.running = false;
     ticking = false;
     emit();
-    return { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0 };
+    return { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0, naraEarned: 0 };
   }
 
   let agents = listAgents(db).filter((a) => a.walletPath && a.walletAddress && a.status !== "paused");
@@ -242,10 +243,10 @@ export async function runPoll(): Promise<PollResult> {
     runtime.running = false;
     ticking = false;
     emit();
-    return { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0 };
+    return { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0, naraEarned: 0 };
   }
 
-  let total: PollResult = { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0 };
+  let total: PollResult = { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0, naraEarned: 0 };
 
   // PHASE 1: Feed scan (once, shared across agents — uses first agent's wallet)
   let feedCodes: Array<{ code: string; postId: string }> = [];

@@ -331,4 +331,29 @@ export function extractBoostCredits(text: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/**
+ * Parse NARA reward amount from CLI stdout.
+ * Matches formats like:
+ *   "Reward: 3.0 NARA"
+ *   "Earned: 1.5 NARA"
+ *   "You received 5 NARA"
+ *   "+3.2 NARA"
+ *   "reward=2.5 NARA"
+ */
+export function extractNaraReward(text: string): number | null {
+  const patterns = [
+    /(?:reward|earned|received|claimed|got|credited|payout|amount)[\s:=]*\+?([0-9]+(?:\.[0-9]+)?)\s*NARA/i,
+    /\+([0-9]+(?:\.[0-9]+)?)\s*NARA/i,
+    /([0-9]+(?:\.[0-9]+)?)\s*NARA\s+(?:reward|earned|received|claimed|credited)/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m) {
+      const n = Number(m[1]);
+      if (!Number.isNaN(n) && n > 0 && n < 10000) return n;
+    }
+  }
+  return null;
+}
+
 export { env as naracliEnv };

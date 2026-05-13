@@ -187,11 +187,20 @@ export function AutomationClient({ initialState, initialRuns, agents }: Props) {
           </div>
         </div>
         <div className="card">
-          <div className="card-label">Total claimed</div>
+          <div className="card-label">Dragon Balls</div>
           <div className="card-value" style={{ color: "var(--accent)" }}>
             {state?.totalCodesClaimed ?? 0}
+            <span className="unit">/ {state?.totalCodesFound ?? 0}</span>
           </div>
-          <div className="card-trend">found: {state?.totalCodesFound ?? 0}</div>
+          <div className="card-trend">claimed / found (auto-claim: {state?.autoClaim ? "ON" : "OFF"})</div>
+        </div>
+        <div className="card">
+          <div className="card-label">NARA earned</div>
+          <div className="card-value" style={{ color: "var(--accent)" }}>
+            +{(state?.totalNaraEarned ?? 0).toFixed(2)}
+            <span className="unit">NARA</span>
+          </div>
+          <div className="card-trend">from dragon ball claims (boost)</div>
         </div>
         <div className="card">
           <div className="card-label">Runs today</div>
