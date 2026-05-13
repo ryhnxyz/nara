@@ -526,6 +526,28 @@ export const TOOLS: AgentTool[] = [
     },
   },
 
+  // ==================== Agent settings ====================
+
+  {
+    name: "set_agent_x_username",
+    description: "Set or update the X/Twitter username for an agent. Required before first run_flow if agent.xUsername is null (used to build the fake bind tweet URL).",
+    parameters: {
+      type: "object",
+      properties: {
+        agentDbId: { type: "string" },
+        xUsername: { type: "string", description: "X/Twitter username, with or without @ prefix" },
+      },
+      required: ["xUsername"],
+    },
+    handler: async (args, ctx) => {
+      const agent = resolveAgent(args, ctx);
+      const clean = String(args.xUsername).replace(/^@/, "").trim();
+      if (!clean) throw new Error("xUsername cannot be empty");
+      patchAgent(openDb(), agent.id, { xUsername: clean });
+      return { ok: true, agentId: agent.agentId, xUsername: clean };
+    },
+  },
+
   // ==================== Destructive ops ====================
 
   {

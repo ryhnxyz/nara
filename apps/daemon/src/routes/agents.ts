@@ -159,6 +159,7 @@ agentsRoute.post("/:id/fund-from-master", async (c) => {
 agentsRoute.post("/:id/run", async (c) => {
   const id = c.req.param("id");
   type RunBody = {
+    xUsername?: string;
     bindTweetUrl?: string;
     dailyTweetUrl?: string;
     tweetBoostAfterClaim?: boolean;

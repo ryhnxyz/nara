@@ -17,11 +17,22 @@ import { naracli, agentx, extractCodes, extractTxSignature } from "../naracli/wr
 import { generateTweet } from "../ai/tweet-gen";
 
 export interface FlowOptions {
+  /** X/Twitter username (without @) — required for first-time bind if agent.xUsername is null */
+  xUsername?: string;
+  /** Override the fake tweet URL entirely (bypasses username substitution) */
   bindTweetUrl?: string;
+  /** Override daily tweet URL (default: reuse bind URL) */
   dailyTweetUrl?: string;
   tweetBoostAfterClaim?: boolean;
   skipFirstPost?: boolean;
   skipDailyTweet?: boolean;
+}
+
+/** Build the fake bind tweet URL from username + template. */
+function buildTweetUrl(username: string, template: string): string {
+  const clean = username.replace(/^@/, "").trim();
+  // Replace existing username in template (between x.com/ and /status)
+  return template.replace(/x\.com\/[^/]+\/status/, `x.com/${clean}/status`);
 }
 
 const active = new Map<string, AbortController>();
@@ -138,21 +149,36 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
   });
   if (reg.status === "error") return finalize(agent.id, run, steps, "error");
 
-  // Step 4: bind-twitter
-  const bindUrl = opts.bindTweetUrl ?? env.defaultFakeBindTweetUrl;
+  // Step 4: bind-twitter — build URL from agent.xUsername + template. First-time bind requires username.
+  const xUsername = opts.xUsername ?? agent.xUsername ?? null;
+  let bindUrl: string;
+  if (opts.bindTweetUrl) {
+    bindUrl = opts.bindTweetUrl;
+  } else if (xUsername) {
+    bindUrl = buildTweetUrl(xUsername, env.defaultFakeBindTweetUrl);
+  } else {
+    bindUrl = env.defaultFakeBindTweetUrl; // fallback so we can still skip if already bound
+  }
+
   const bindStep = await record("bind-twitter", async () => {
-    if (agent.twitterBound) return { status: "skipped", message: "already bound" };
+    if (agent.twitterBound) return { status: "skipped", message: `already bound (${agent.xUsername ?? "username not recorded"})` };
+    if (!xUsername && !opts.bindTweetUrl) {
+      return {
+        status: "error",
+        message: "xUsername required for first-time bind. Set opts.xUsername (e.g. 'NESAM_SM') or update agent.xUsername via PATCH /api/agents/:id before running flow.",
+      };
+    }
     const r = await naracli.agentBindTwitter(bindUrl, agent.agentId, { walletPath: wallet.path, timeoutMs: 180_000 });
     if (!r.ok) {
       const alreadyBound = /already|bound/i.test(r.stdout + r.stderr);
       if (alreadyBound) {
-        patchAgent(db, agent.id, { twitterBound: true });
+        patchAgent(db, agent.id, { twitterBound: true, xUsername: xUsername ?? agent.xUsername });
         return { status: "skipped", message: "already bound (upstream)" };
       }
       return { status: "error", message: r.stderr.slice(0, 200) || "bind-twitter failed" };
     }
-    patchAgent(db, agent.id, { twitterBound: true });
-    return { status: "success", message: "twitter bound", meta: { tweet: bindUrl } };
+    patchAgent(db, agent.id, { twitterBound: true, xUsername: xUsername ?? agent.xUsername });
+    return { status: "success", message: `twitter bound as @${xUsername ?? "?"}`, meta: { tweet: bindUrl, xUsername } };
   });
   if (bindStep.status === "error") return finalize(agent.id, run, steps, "error");
 
