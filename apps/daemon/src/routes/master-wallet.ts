@@ -4,6 +4,7 @@ import { resolve, dirname } from "node:path";
 import { env } from "../lib/env";
 import { log } from "../lib/logger";
 import { naracli, extractTxSignature } from "../naracli/wrapper";
+import { onMasterWalletImported, onMasterWalletRemoved } from "../workers/distribute";
 
 export const masterWalletRoute = new Hono();
 
@@ -59,7 +60,14 @@ masterWalletRoute.post("/import", async (c) => {
 
   log({ level: "success", scope: "master-wallet", message: `Imported master wallet: ${addr}` });
 
-  return c.json({ ok: true, path, address: addr, balance: bal.nara });
+  // Auto-enable sweep worker so funds start flowing to master without manual toggle
+  try {
+    if (addr) await onMasterWalletImported(addr);
+  } catch (err) {
+    log({ level: "warn", scope: "master-wallet", message: `could not auto-enable sweep: ${(err as Error).message}` });
+  }
+
+  return c.json({ ok: true, path, address: addr, balance: bal.nara, sweepEnabled: true });
 });
 
 masterWalletRoute.post("/remove", async (c) => {
@@ -68,6 +76,7 @@ masterWalletRoute.post("/remove", async (c) => {
     try {
       unlinkSync(path);
       log({ level: "warn", scope: "master-wallet", message: "Master wallet file removed" });
+      try { onMasterWalletRemoved(); } catch {}
     } catch (err) {
       return c.json({ error: (err as Error).message }, 500);
     }

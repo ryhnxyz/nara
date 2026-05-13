@@ -1,8 +1,11 @@
 import { openDb, listAgents, patchAgent } from "@nara-bot/db";
 import { nowIso } from "@nara-bot/core";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { env } from "../lib/env";
 import { log } from "../lib/logger";
 import { naracli, extractTxSignature } from "../naracli/wrapper";
+
 
 export interface DistributeState {
   enabled: boolean;
@@ -45,8 +48,56 @@ export function configureDistribute(patch: Partial<Pick<DistributeState, "enable
   return getDistributeState();
 }
 
-export function startDistributeWorker(): void {
+function masterWalletFilePath(): string {
+  return resolve(env.walletsDir, "..", "master-wallet.json");
+}
+
+/**
+ * Auto-enable sweep when master wallet file exists (imported).
+  * This survives daemon restarts — if user imported master via /import,
+ * sweep stays ON until master is removed.
+ */
+export async function startDistributeWorker(): Promise<void> {
+  const path = masterWalletFilePath();
+  const masterExists = existsSync(path);
+
+  // If master wallet file exists but state has no address, auto-resolve it
+  if (masterExists && !state.masterAddress) {
+    try {
+      const addr = await naracli.address({ walletPath: path });
+      if (addr) {
+        state.masterAddress = addr;
+        state.enabled = true;
+        log({ level: "info", scope: "distribute", message: `master wallet detected at boot → auto-enabled sweep (${addr})` });
+      }
+    } catch (err) {
+      log({ level: "warn", scope: "distribute", message: `could not resolve master address at boot: ${(err as Error).message}` });
+    }
+  }
+
   if (state.enabled && state.masterAddress) startTimer();
+}
+
+/**
+ * Called when master wallet is (re)imported — enables sweep automatically
+ * and starts the timer loop.
+ */
+export async function onMasterWalletImported(address: string): Promise<void> {
+  state.masterAddress = address;
+  state.enabled = true;
+  state.lastError = null;
+  log({ level: "success", scope: "distribute", message: `master wallet imported → auto-enabling sweep (${address})` });
+  if (!timer) startTimer();
+}
+
+/**
+ * Called when master wallet is removed — disables sweep.
+ */
+export function onMasterWalletRemoved(): void {
+  state.enabled = false;
+  state.masterAddress = "";
+  stopTimer();
+  log({ level: "warn", scope: "distribute", message: "master wallet removed → sweep disabled" });
 }
 
 function startTimer(): void {

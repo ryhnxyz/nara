@@ -223,9 +223,16 @@ export async function runPoll(): Promise<PollResult> {
 
   if (runtime.runsToday >= runtime.maxRunsPerDay) {
     runtime.lastPollStatus = "error";
-    runtime.lastError = `daily cap reached (${runtime.runsToday}/${runtime.maxRunsPerDay})`;
+    runtime.lastError = `daily cap reached (${runtime.runsToday}/${runtime.maxRunsPerDay}) — worker auto-disabled`;
     runtime.running = false;
     ticking = false;
+    // Auto-disable worker when daily cap is hit
+    try {
+      patchAutomationSettings(db, WORKER_KEY, { enabled: false });
+      runtime.enabled = false;
+      stopLoop();
+      log({ level: "warn", scope: "hunt", message: `daily cap reached (${runtime.runsToday}/${runtime.maxRunsPerDay}) — worker auto-disabled until reset` });
+    } catch {}
     emit();
     return { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0, naraEarned: 0 };
   }

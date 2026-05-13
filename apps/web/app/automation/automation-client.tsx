@@ -204,11 +204,19 @@ export function AutomationClient({ initialState, initialRuns, agents }: Props) {
         </div>
         <div className="card">
           <div className="card-label">Runs today</div>
-          <div className="card-value">
+          <div className="card-value" style={{
+            color: (state?.runsToday ?? 0) >= (state?.maxRunsPerDay ?? 500) ? "var(--danger)" : undefined,
+          }}>
             {state?.runsToday ?? 0}
             <span className="unit">/ {state?.maxRunsPerDay ?? "∞"}</span>
           </div>
-          <div className="card-trend">total: {state?.totalRuns ?? 0}</div>
+          <div className="card-trend" style={{
+            color: (state?.runsToday ?? 0) >= (state?.maxRunsPerDay ?? 500) ? "var(--danger)" : "var(--text-dim)",
+          }}>
+            {(state?.runsToday ?? 0) >= (state?.maxRunsPerDay ?? 500)
+              ? "⛔ daily cap reached · worker auto-disabled"
+              : `total: ${state?.totalRuns ?? 0}`}
+          </div>
         </div>
         <div className="card">
           <div className="card-label">Last poll</div>
