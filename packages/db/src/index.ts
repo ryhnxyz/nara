@@ -334,3 +334,120 @@ function rowToMsg(row: any): ChatMessage {
     createdAt: row.created_at,
   };
 }
+
+// -------- Automation --------
+export interface AutomationSettings {
+  key: string;
+  enabled: boolean;
+  intervalSeconds: number;
+  autoClaim: boolean;
+  tweetBoostUrl: string | null;
+  targetAgentIds: string[] | null;
+  maxRunsPerDay: number;
+  updatedAt: string;
+}
+
+export interface AutomationRun {
+  id: string;
+  worker: string;
+  agentId: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  status: "running" | "ok" | "error" | "skipped";
+  codesFound: number;
+  codesClaimed: number;
+  naraEarned: number;
+  errors: number;
+  note: string | null;
+}
+
+export function getAutomationSettings(db: Db, key: string): AutomationSettings {
+  const row = db.prepare("SELECT * FROM automation_settings WHERE key = ?").get(key) as any;
+  if (!row) {
+    const now = nowIso();
+    const defaults = { key, enabled: false, intervalSeconds: 180, autoClaim: true, tweetBoostUrl: null, targetAgentIds: null, maxRunsPerDay: 500, updatedAt: now };
+    db.prepare(`
+      INSERT INTO automation_settings (key, enabled, interval_seconds, auto_claim, tweet_boost_url, target_agent_ids, max_runs_per_day, updated_at)
+      VALUES (@key, @enabled, @intervalSeconds, @autoClaim, @tweetBoostUrl, @targetAgentIds, @maxRunsPerDay, @updatedAt)
+    `).run({ ...defaults, enabled: 0, autoClaim: 1, targetAgentIds: null });
+    return defaults;
+  }
+  return {
+    key: row.key,
+    enabled: !!row.enabled,
+    intervalSeconds: row.interval_seconds,
+    autoClaim: !!row.auto_claim,
+    tweetBoostUrl: row.tweet_boost_url ?? null,
+    targetAgentIds: row.target_agent_ids ? JSON.parse(row.target_agent_ids) : null,
+    maxRunsPerDay: row.max_runs_per_day,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function patchAutomationSettings(db: Db, key: string, patch: Partial<AutomationSettings>): AutomationSettings {
+  const current = getAutomationSettings(db, key);
+  const merged = { ...current, ...patch, updatedAt: nowIso() };
+  db.prepare(`
+    UPDATE automation_settings
+    SET enabled = @enabled,
+        interval_seconds = @intervalSeconds,
+        auto_claim = @autoClaim,
+        tweet_boost_url = @tweetBoostUrl,
+        target_agent_ids = @targetAgentIds,
+        max_runs_per_day = @maxRunsPerDay,
+        updated_at = @updatedAt
+    WHERE key = @key
+  `).run({
+    key,
+    enabled: merged.enabled ? 1 : 0,
+    intervalSeconds: merged.intervalSeconds,
+    autoClaim: merged.autoClaim ? 1 : 0,
+    tweetBoostUrl: merged.tweetBoostUrl,
+    targetAgentIds: merged.targetAgentIds ? JSON.stringify(merged.targetAgentIds) : null,
+    maxRunsPerDay: merged.maxRunsPerDay,
+    updatedAt: merged.updatedAt,
+  });
+  return merged;
+}
+
+export function insertAutomationRun(
+  db: Db,
+  input: Omit<AutomationRun, "id" | "startedAt"> & { startedAt?: string }
+): AutomationRun {
+  const run: AutomationRun = {
+    ...input,
+    id: createId("arun"),
+    startedAt: input.startedAt ?? nowIso(),
+  };
+  db.prepare(`
+    INSERT INTO automation_runs (id, worker, agent_id, started_at, finished_at, status, codes_found, codes_claimed, nara_earned, errors, note)
+    VALUES (@id, @worker, @agentId, @startedAt, @finishedAt, @status, @codesFound, @codesClaimed, @naraEarned, @errors, @note)
+  `).run(run);
+  return run;
+}
+
+export function countAutomationRunsToday(db: Db, worker: string): number {
+  const row = db.prepare(
+    "SELECT COUNT(*) as n FROM automation_runs WHERE worker = ? AND started_at > datetime('now', '-1 day')"
+  ).get(worker) as any;
+  return Number(row?.n ?? 0);
+}
+
+export function recentAutomationRuns(db: Db, worker?: string, limit = 50): AutomationRun[] {
+  const rows = worker
+    ? db.prepare("SELECT * FROM automation_runs WHERE worker = ? ORDER BY started_at DESC LIMIT ?").all(worker, limit)
+    : db.prepare("SELECT * FROM automation_runs ORDER BY started_at DESC LIMIT ?").all(limit);
+  return (rows as any[]).map((r) => ({
+    id: r.id,
+    worker: r.worker,
+    agentId: r.agent_id ?? null,
+    startedAt: r.started_at,
+    finishedAt: r.finished_at ?? null,
+    status: r.status,
+    codesFound: Number(r.codes_found ?? 0),
+    codesClaimed: Number(r.codes_claimed ?? 0),
+    naraEarned: Number(r.nara_earned ?? 0),
+    errors: Number(r.errors ?? 0),
+    note: r.note ?? null,
+  }));
+}

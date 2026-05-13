@@ -10,6 +10,7 @@ const NAV = [
   { href: "/", label: "Overview" },
   { href: "/agents", label: "Agents" },
   { href: "/dragonball", label: "Dragon Ball" },
+  { href: "/automation", label: "Automation" },
   { href: "/chat", label: "AI Agent" },
   { href: "/skills", label: "Skills" },
   { href: "/settings", label: "Settings" },

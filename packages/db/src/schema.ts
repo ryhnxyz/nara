@@ -73,4 +73,31 @@ CREATE TABLE IF NOT EXISTS settings (
   value_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS automation_settings (
+  key TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  interval_seconds INTEGER NOT NULL DEFAULT 180,
+  auto_claim INTEGER NOT NULL DEFAULT 1,
+  tweet_boost_url TEXT,
+  target_agent_ids TEXT,
+  max_runs_per_day INTEGER NOT NULL DEFAULT 500,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS automation_runs (
+  id TEXT PRIMARY KEY,
+  worker TEXT NOT NULL,
+  agent_id TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  status TEXT NOT NULL,
+  codes_found INTEGER NOT NULL DEFAULT 0,
+  codes_claimed INTEGER NOT NULL DEFAULT 0,
+  nara_earned REAL NOT NULL DEFAULT 0,
+  errors INTEGER NOT NULL DEFAULT 0,
+  note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_started ON automation_runs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_worker ON automation_runs(worker, started_at DESC);
 `;

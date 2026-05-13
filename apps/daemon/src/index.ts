@@ -12,7 +12,9 @@ import { aiRoute } from "./routes/ai";
 import { skillsRoute } from "./routes/skills";
 import { distributeRoute } from "./routes/distribute";
 import { masterWalletRoute } from "./routes/master-wallet";
+import { automationRoute } from "./routes/automation";
 import { startDistributeWorker } from "./workers/distribute";
+import { initHuntWorker } from "./workers/hunt";
 
 const app = new Hono();
 app.use("*", cors());
@@ -36,6 +38,7 @@ app.route("/api/ai", aiRoute);
 app.route("/api/skills", skillsRoute);
 app.route("/api/distribute", distributeRoute);
 app.route("/api/master-wallet", masterWalletRoute);
+app.route("/api/automation", automationRoute);
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 app.onError((err, c) => {
@@ -45,6 +48,7 @@ app.onError((err, c) => {
 
 initDb(openDb());
 startDistributeWorker();
+initHuntWorker();
 
 serve({ fetch: app.fetch, port: env.port, hostname: "0.0.0.0" }, (info) => {
   log({ level: "success", scope: "daemon", message: `Nara bot daemon listening on 0.0.0.0:${info.port}` });
