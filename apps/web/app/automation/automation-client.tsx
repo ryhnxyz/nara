@@ -10,6 +10,13 @@ interface HuntState {
   tweetBoostUrl: string | null;
   targetAgentIds: string[] | null;
   maxRunsPerDay: number;
+  scanDmInbox: boolean;
+  scanFeed: boolean;
+  feedLimit: number;
+  engageActivity: boolean;
+  likesPerPoll: number;
+  commentsPerPoll: number;
+  followsPerPoll: number;
   updatedAt: string;
   lastPollAt: string | null;
   lastPollStatus: "idle" | "ok" | "error";
@@ -18,8 +25,10 @@ interface HuntState {
   totalRuns: number;
   totalCodesFound: number;
   totalCodesClaimed: number;
+  totalEngagements: number;
   totalNaraEarned: number;
   currentAgentId: string | null;
+  currentPhase: "idle" | "dm" | "feed" | "engage" | "claim";
   nextPollAt: string | null;
 }
 
@@ -51,6 +60,11 @@ export function AutomationClient({ initialState, initialRuns, agents }: Props) {
   const [tweetBoostUrl, setTweetBoostUrl] = useState(initialState?.tweetBoostUrl ?? "");
   const [maxRunsPerDay, setMaxRunsPerDay] = useState(initialState?.maxRunsPerDay ?? 500);
   const [targetIds, setTargetIds] = useState<string[]>(initialState?.targetAgentIds ?? []);
+  const [scanDmInbox, setScanDmInbox] = useState(initialState?.scanDmInbox ?? true);
+  const [scanFeed, setScanFeed] = useState(initialState?.scanFeed ?? true);
+  const [feedLimit, setFeedLimit] = useState(initialState?.feedLimit ?? 50);
+  const [engageActivity, setEngageActivity] = useState(initialState?.engageActivity ?? false);
+  const [likesPerPoll, setLikesPerPoll] = useState(initialState?.likesPerPoll ?? 3);
   const [message, setMessage] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(Date.now());
 
@@ -110,6 +124,11 @@ export function AutomationClient({ initialState, initialRuns, agents }: Props) {
           tweetBoostUrl: tweetBoostUrl.trim() || null,
           maxRunsPerDay,
           targetAgentIds: targetIds.length > 0 ? targetIds : null,
+          scanDmInbox,
+          scanFeed,
+          feedLimit,
+          engageActivity,
+          likesPerPoll,
         }),
       });
       const data = await res.json();
@@ -128,7 +147,7 @@ export function AutomationClient({ initialState, initialRuns, agents }: Props) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? res.statusText);
       setState(data.state);
-      setMessage(`Run: found=${data.codesFound} claimed=${data.codesClaimed} errors=${data.errors}`);
+      setMessage(`Run: found=${data.codesFound} claimed=${data.codesClaimed} engaged=${data.engagements ?? 0} errors=${data.errors}`);
     } catch (err) {
       setMessage(`Error: ${(err as Error).message}`);
     }
@@ -204,7 +223,7 @@ export function AutomationClient({ initialState, initialRuns, agents }: Props) {
           <div className="row" style={{ gap: 8 }}>
             <span className="chip chip-live">● POLLING</span>
             <span>
-              Checking agent: <strong style={{ color: "var(--accent)" }}>{currentAgent.agentId}</strong>
+              Phase <strong style={{ color: "var(--accent)" }}>{state?.currentPhase ?? "—"}</strong> · agent <strong style={{ color: "var(--accent)" }}>{currentAgent.agentId}</strong>
             </span>
           </div>
         </div>
@@ -276,6 +295,69 @@ export function AutomationClient({ initialState, initialRuns, agents }: Props) {
             value={maxRunsPerDay}
             onChange={(e) => setMaxRunsPerDay(Number(e.target.value))}
           />
+        </div>
+
+        <div className="form-row" style={{ gridTemplateColumns: "160px 1fr", alignItems: "start" }}>
+          <label>Hunt channels</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 11 }}>
+            <label className="row" style={{ gap: 6 }}>
+              <input type="checkbox" checked={scanDmInbox} onChange={(e) => setScanDmInbox(e.target.checked)} />
+              <span className="muted">
+                <strong style={{ color: "var(--text)" }}>DM inbox</strong> — Activity lottery + Quality DMs (<code>agentx-cli dm-inbox</code>)
+              </span>
+            </label>
+            <label className="row" style={{ gap: 6 }}>
+              <input type="checkbox" checked={scanFeed} onChange={(e) => setScanFeed(e.target.checked)} />
+              <span className="muted">
+                <strong style={{ color: "var(--text)" }}>Feed scan</strong> — fetch <code>agentx-cli feed</code>, filter <code>eggSent:true</code>, harvest comments
+              </span>
+            </label>
+            <div className="row" style={{ gap: 6, paddingLeft: 20 }}>
+              <label className="muted" style={{ fontSize: 10 }}>feed limit</label>
+              <input
+                className="input"
+                type="number"
+                min="10"
+                max="200"
+                value={feedLimit}
+                onChange={(e) => setFeedLimit(Number(e.target.value))}
+                style={{ width: 80, fontSize: 11 }}
+                disabled={!scanFeed}
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="form-row" style={{ gridTemplateColumns: "160px 1fr", alignItems: "start" }}>
+          <label>Activity engagement</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 11 }}>
+            <label className="row" style={{ gap: 6 }}>
+              <input
+                type="checkbox"
+                checked={engageActivity}
+                onChange={(e) => setEngageActivity(e.target.checked)}
+              />
+              <span className="muted">
+                <strong style={{ color: "var(--text)" }}>Auto-like feed posts</strong> — triggers Activity lottery wins (lottery runs every 3 min server-side)
+              </span>
+            </label>
+            <div className="row" style={{ gap: 6, paddingLeft: 20 }}>
+              <label className="muted" style={{ fontSize: 10 }}>likes / poll</label>
+              <input
+                className="input"
+                type="number"
+                min="0"
+                max="20"
+                value={likesPerPoll}
+                onChange={(e) => setLikesPerPoll(Number(e.target.value))}
+                style={{ width: 80, fontSize: 11 }}
+                disabled={!engageActivity}
+              />
+              <span className="muted" style={{ fontSize: 10 }}>
+                be conservative — high engage rate can look spammy
+              </span>
+            </div>
+          </div>
         </div>
 
         <div className="form-row" style={{ gridTemplateColumns: "160px 1fr", alignItems: "start" }}>

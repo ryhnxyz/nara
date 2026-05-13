@@ -599,6 +599,13 @@ export const TOOLS: AgentTool[] = [
           description: "limit to these agent DB ids; omit/empty = all eligible",
         },
         maxRunsPerDay: { type: "number", description: "safety cap across whole worker" },
+        scanDmInbox: { type: "boolean", description: "enable Channel 1: poll agentx-cli dm-inbox" },
+        scanFeed: { type: "boolean", description: "enable Channel 2: scan agentx feed for eggSent posts + harvest comments" },
+        feedLimit: { type: "number", description: "max posts to fetch per feed scan (10-200, default 50)" },
+        engageActivity: { type: "boolean", description: "enable Channel 3: like posts in feed to trigger Activity lottery wins" },
+        likesPerPoll: { type: "number", description: "how many posts to like per poll (0-20, default 3)" },
+        commentsPerPoll: { type: "number", description: "how many posts to comment per poll (0-5, default 0, reserved)" },
+        followsPerPoll: { type: "number", description: "how many agents to follow per poll (0-10, default 0, reserved)" },
       },
     },
     handler: async (args) => {
@@ -609,6 +616,13 @@ export const TOOLS: AgentTool[] = [
       if (args.tweetBoostUrl !== undefined) patch.tweetBoostUrl = args.tweetBoostUrl ? String(args.tweetBoostUrl) : null;
       if (Array.isArray(args.targetAgentIds)) patch.targetAgentIds = (args.targetAgentIds as string[]).length ? args.targetAgentIds : null;
       if (args.maxRunsPerDay !== undefined) patch.maxRunsPerDay = Math.max(1, Number(args.maxRunsPerDay));
+      if (args.scanDmInbox !== undefined) patch.scanDmInbox = !!args.scanDmInbox;
+      if (args.scanFeed !== undefined) patch.scanFeed = !!args.scanFeed;
+      if (args.feedLimit !== undefined) patch.feedLimit = Math.max(10, Math.min(200, Number(args.feedLimit)));
+      if (args.engageActivity !== undefined) patch.engageActivity = !!args.engageActivity;
+      if (args.likesPerPoll !== undefined) patch.likesPerPoll = Math.max(0, Math.min(20, Number(args.likesPerPoll)));
+      if (args.commentsPerPoll !== undefined) patch.commentsPerPoll = Math.max(0, Math.min(5, Number(args.commentsPerPoll)));
+      if (args.followsPerPoll !== undefined) patch.followsPerPoll = Math.max(0, Math.min(10, Number(args.followsPerPoll)));
       return configureHunt(patch);
     },
   },
