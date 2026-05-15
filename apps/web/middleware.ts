@@ -44,7 +44,8 @@ export async function middleware(req: NextRequest) {
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
-    const loginUrl = new URL("/login", req.url);
+    const origin = process.env.NEXT_PUBLIC_APP_ORIGIN || req.url;
+    const loginUrl = new URL("/login", origin);
     loginUrl.searchParams.set("next", pathname);
     return NextResponse.redirect(loginUrl);
   }
