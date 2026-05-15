@@ -48,6 +48,16 @@ const state: DistributeState = {
 };
 
 let timer: NodeJS.Timeout | null = null;
+let agentCursor = 0;
+
+function envNumber(name: string, fallback: number, min: number, max: number): number {
+  const raw = Number(process.env[name] ?? fallback);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(min, Math.min(max, raw));
+}
+
+const MAX_AGENTS_PER_RUN = envNumber("DISTRIBUTE_MAX_AGENTS_PER_RUN", 10, 1, 100);
+const MAX_RUN_MS = envNumber("DISTRIBUTE_MAX_RUN_MS", 180_000, 30_000, 900_000);
 
 export function getDistributeState(): DistributeState {
   return { ...state };
@@ -157,19 +167,24 @@ function startTimer(): void {
   log({
     level: "info",
     scope: "distribute",
-    message: `auto-distribute ON → interval=${state.intervalHours}h`,
+    message: `auto-distribute ON → interval=${state.intervalHours}h batch=${MAX_AGENTS_PER_RUN}`,
   });
-  const tick = () =>
-    runDistribution().catch((err) => {
+  const schedule = (delayMs: number) => {
+    timer = setTimeout(() => {
+      timer = null;
+      runDistribution().catch((err) => {
       state.lastRunStatus = "error";
       state.lastError = (err as Error).message;
-    });
-  tick();
-  timer = setInterval(tick, ms);
+      }).finally(() => {
+        if (state.enabled) schedule(ms);
+      });
+    }, delayMs);
+  };
+  schedule(Math.min(60_000, ms));
 }
 
 function stopTimer(): void {
-  if (timer) clearInterval(timer);
+  if (timer) clearTimeout(timer);
   timer = null;
   log({ level: "info", scope: "distribute", message: "auto-distribute OFF" });
 }
@@ -184,6 +199,8 @@ function stopTimer(): void {
  */
 export async function runDistribution(): Promise<{ transfers: number; naraSent: number; errors: number }> {
   if (state.running) throw new Error("distribution already running");
+  const startedMs = Date.now();
+  const timedOut = () => Date.now() - startedMs >= MAX_RUN_MS;
 
   const masters = discoverMasterWallets();
   if (masters.length === 0) throw new Error("no master wallet files present");
@@ -216,7 +233,7 @@ export async function runDistribution(): Promise<{ transfers: number; naraSent: 
     }
 
     // Select agents for this master
-    const scoped = allAgents.filter((a) => {
+    let scoped = allAgents.filter((a) => {
       if (master.ownerSlug) {
         const ownerEmail = (a as any).ownerEmail as string | null;
         return ownerEmail ? ownerSlug(ownerEmail) === master.ownerSlug : false;
@@ -224,14 +241,25 @@ export async function runDistribution(): Promise<{ transfers: number; naraSent: 
       // Legacy master handles all untagged agents
       return !((a as any).ownerEmail);
     });
+    const scopedCount = scoped.length;
+    if (scoped.length > MAX_AGENTS_PER_RUN) {
+      const start = agentCursor % scoped.length;
+      scoped = [...scoped.slice(start), ...scoped.slice(0, start)].slice(0, MAX_AGENTS_PER_RUN);
+      agentCursor = (start + scoped.length) % scopedCount;
+    }
 
     log({
       level: "info",
       scope: "distribute",
-      message: `master=${masterAddr.slice(0, 10)}… agents=${scoped.length} (${master.ownerSlug ?? "legacy"})`,
+      message: `master=${masterAddr.slice(0, 10)}… agents=${scoped.length}/${scopedCount} (${master.ownerSlug ?? "legacy"})`,
     });
 
     for (const agent of scoped) {
+      if (timedOut()) {
+        errors++;
+        log({ level: "warn", scope: "distribute", message: "sweep budget reached; remaining agents deferred" });
+        break;
+      }
       try {
         if (!agent.walletPath) continue;
         if (agent.walletAddress === masterAddr) continue;
