@@ -28,6 +28,16 @@ import { agentx, extractTxSignature, extractCodes, extractNaraReward, type Agent
 
 const WORKER_KEY = "hunt";
 
+function envNumber(name: string, fallback: number, min: number, max: number): number {
+  const raw = Number(process.env[name] ?? fallback);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(min, Math.min(max, raw));
+}
+
+const MAX_AGENTS_PER_POLL = envNumber("HUNT_MAX_AGENTS_PER_POLL", 3, 1, 25);
+const MAX_POLL_MS = envNumber("HUNT_MAX_POLL_MS", 150_000, 30_000, 900_000);
+const ERROR_BACKOFF_MS = envNumber("HUNT_ERROR_BACKOFF_MS", 300_000, 60_000, 3_600_000);
+
 export interface HuntRuntimeState {
   enabled: boolean;
   running: boolean;
@@ -96,6 +106,8 @@ huntEvents.setMaxListeners(100);
 
 let timer: NodeJS.Timeout | null = null;
 let ticking = false;
+let agentCursor = 0;
+let consecutiveErrorPolls = 0;
 
 // Per-run seen-posts cache to avoid re-engaging same post
 const engagedPostIds = new Set<string>();
@@ -178,27 +190,45 @@ export function configureHunt(patch: Partial<AutomationSettings> & Record<string
   }
   applySettings(full);
 
-  if (runtime.enabled) startLoop();
-  else stopLoop();
+  if (runtime.enabled) {
+    if (timer) scheduleNext(runtime.intervalSeconds * 1000);
+    else startLoop();
+  } else {
+    stopLoop();
+  }
 
   emit();
   return getHuntState();
 }
 
+function scheduleNext(delayMs: number) {
+  if (!runtime.enabled) return;
+  if (timer) clearTimeout(timer);
+  runtime.nextPollAt = new Date(Date.now() + delayMs).toISOString();
+  timer = setTimeout(() => {
+    timer = null;
+    void runPoll().finally(() => {
+      if (!runtime.enabled) return;
+      const delay = consecutiveErrorPolls >= 3 ? ERROR_BACKOFF_MS : runtime.intervalSeconds * 1000;
+      scheduleNext(delay);
+    });
+  }, delayMs);
+  emit();
+}
+
 function startLoop() {
   if (timer) return;
-  runtime.nextPollAt = new Date(Date.now() + runtime.intervalSeconds * 1000).toISOString();
-  const tick = () => {
-    void runPoll();
-  };
-  tick();
-  timer = setInterval(tick, runtime.intervalSeconds * 1000);
-  log({ level: "info", scope: "hunt", message: `loop started · ${runtime.intervalSeconds}s interval` });
+  scheduleNext(1_000);
+  log({
+    level: "info",
+    scope: "hunt",
+    message: `loop started · ${runtime.intervalSeconds}s interval · batch=${MAX_AGENTS_PER_POLL} maxPoll=${Math.round(MAX_POLL_MS / 1000)}s`,
+  });
 }
 
 function stopLoop() {
   if (!timer) return;
-  clearInterval(timer);
+  clearTimeout(timer);
   timer = null;
   runtime.nextPollAt = null;
   log({ level: "info", scope: "hunt", message: "loop stopped" });
@@ -213,10 +243,16 @@ export interface PollResult {
 }
 
 export async function runPoll(): Promise<PollResult> {
-  if (ticking) return { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0, naraEarned: 0 };
+  if (ticking) {
+    runtime.lastError = "poll already running; skipped overlapping trigger";
+    emit();
+    return { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 1, naraEarned: 0 };
+  }
+  const pollStartedMs = Date.now();
+  const pollTimedOut = () => Date.now() - pollStartedMs >= MAX_POLL_MS;
   ticking = true;
   runtime.running = true;
-  runtime.nextPollAt = new Date(Date.now() + runtime.intervalSeconds * 1000).toISOString();
+  runtime.nextPollAt = null;
   emit();
 
   const db = openDb();
@@ -254,6 +290,18 @@ export async function runPoll(): Promise<PollResult> {
     return { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0, naraEarned: 0 };
   }
 
+  const eligibleCount = agents.length;
+  if (agents.length > MAX_AGENTS_PER_POLL) {
+    const start = agentCursor % agents.length;
+    agents = [...agents.slice(start), ...agents.slice(0, start)].slice(0, MAX_AGENTS_PER_POLL);
+    agentCursor = (start + agents.length) % eligibleCount;
+    log({
+      level: "info",
+      scope: "hunt",
+      message: `processing ${agents.length}/${eligibleCount} eligible agents this poll (cursor=${agentCursor})`,
+    });
+  }
+
   let total: PollResult = { codesFound: 0, codesClaimed: 0, engagements: 0, errors: 0, naraEarned: 0 };
 
   // PHASE 1: Feed scan (once, shared across agents — uses first agent's wallet)
@@ -273,8 +321,9 @@ export async function runPoll(): Promise<PollResult> {
       feedPostIds = posts.map((p) => p.postId ?? p.id).filter(Boolean);
 
       // Check feed stdout + content for eggSent posts and any inline codes
-      const eggCandidates = posts.filter((p) => p.eggSent);
+      const eggCandidates = posts.filter((p) => p.eggSent).slice(0, 10);
       for (const p of eggCandidates) {
+        if (pollTimedOut()) break;
         const codes = extractCodes(p.content + " " + (p.title ?? ""));
         for (const code of codes) {
           feedCodes.push({ code, postId: p.postId ?? p.id });
@@ -310,6 +359,11 @@ export async function runPoll(): Promise<PollResult> {
 
   // Process each agent for DM + engage + claim
   for (const agent of agents) {
+    if (pollTimedOut()) {
+      total.errors++;
+      log({ level: "warn", scope: "hunt", message: `poll budget reached after ${Date.now() - pollStartedMs}ms; remaining agents deferred` });
+      break;
+    }
     runtime.currentAgentId = agent.id;
     const runStart = nowIso();
     let codesFoundForAgent = 0;
@@ -357,7 +411,12 @@ export async function runPoll(): Promise<PollResult> {
     if (runtime.autoClaim && codesToClaim.length > 0) {
       runtime.currentPhase = "claim";
       emit();
-      for (const code of codesToClaim) {
+      for (const code of Array.from(new Set(codesToClaim)).slice(0, 5)) {
+        if (pollTimedOut()) {
+          errorsForAgent++;
+          note = "poll budget reached during claim; remaining codes deferred";
+          break;
+        }
         const claim = await agentx.codeClaim(code, {
           walletPath: agent.walletPath!,
           agentId: agent.agentId,
@@ -373,7 +432,8 @@ export async function runPoll(): Promise<PollResult> {
           const eggId = code.split(".")[0];
           let rewardNara = 0;
           let rewardRaw: string | null = null;
-          for (let attempt = 0; attempt < 8; attempt++) {
+          for (let attempt = 0; attempt < 5; attempt++) {
+            if (pollTimedOut()) break;
             await new Promise((r) => setTimeout(r, attempt === 0 ? 3_000 : 5_000));
             const statusR = await agentx.codeStatus(eggId, {
               walletPath: agent.walletPath!,
@@ -474,6 +534,7 @@ export async function runPoll(): Promise<PollResult> {
   runtime.lastPollAt = nowIso();
   runtime.lastPollStatus = total.errors > 0 && total.codesClaimed === 0 && total.engagements === 0 ? "error" : "ok";
   runtime.lastError = total.errors > 0 ? `${total.errors} error(s) this poll` : null;
+  consecutiveErrorPolls = runtime.lastPollStatus === "error" ? consecutiveErrorPolls + 1 : 0;
   runtime.totalCodesFound += total.codesFound;
   runtime.totalCodesClaimed += total.codesClaimed;
   runtime.totalNaraEarned += total.naraEarned;

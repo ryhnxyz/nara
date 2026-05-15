@@ -474,13 +474,14 @@ export function insertAutomationRun(
 }
 
 export function countAutomationRunsToday(db: Db, worker: string, ownerEmail?: string | null): number {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const row = ownerEmail
     ? db.prepare(
-        "SELECT COUNT(*) as n FROM automation_runs WHERE worker = ? AND owner_email = ? AND started_at > datetime('now', '-1 day')"
-      ).get(worker, ownerEmail) as any
+        "SELECT COUNT(*) as n FROM automation_runs WHERE worker = ? AND owner_email = ? AND started_at > ?"
+      ).get(worker, ownerEmail, since) as any
     : db.prepare(
-        "SELECT COUNT(*) as n FROM automation_runs WHERE worker = ? AND started_at > datetime('now', '-1 day')"
-      ).get(worker) as any;
+        "SELECT COUNT(*) as n FROM automation_runs WHERE worker = ? AND started_at > ?"
+      ).get(worker, since) as any;
   return Number(row?.n ?? 0);
 }
 
