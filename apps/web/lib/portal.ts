@@ -95,15 +95,8 @@ export function clientIpFromHeaders(headers: Headers): string | null {
   return null;
 }
 
-function buildForwardHeaders(clientIp?: string | null, clientUa?: string | null): HeadersInit {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (clientIp) {
-    h["X-Forwarded-For"] = clientIp;
-    h["X-Real-IP"] = clientIp;
-    h["CF-Connecting-IP"] = clientIp;
-  }
-  if (clientUa) h["User-Agent"] = clientUa;
-  return h;
+function buildForwardHeaders(_clientIp?: string | null, _clientUa?: string | null): HeadersInit {
+  return { "Content-Type": "application/json" };
 }
 
 /** Initialize a gateway session handle and return the URL user should be redirected to. */
