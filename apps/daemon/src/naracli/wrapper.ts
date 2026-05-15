@@ -46,7 +46,7 @@ function safeName(value: string): string {
 function stripNpmWarnings(text: string): string {
   return text
     .split(/\r?\n/)
-    .filter((line) => !/^npm warn Unknown env config /i.test(line.trim()))
+    .filter((line) => !/^npm warn /i.test(line.trim()))
     .join("\n")
     .trim();
 }
