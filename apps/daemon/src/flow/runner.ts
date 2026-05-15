@@ -35,6 +35,12 @@ function buildTweetUrl(username: string, template: string): string {
   return template.replace(/x\.com\/[^/]+\/status/, `x.com/${clean}/status`);
 }
 
+function parseTweetUsername(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const m = url.match(/(?:https?:\/\/)?(?:www\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,20})\/status\//i);
+  return m?.[1] ?? null;
+}
+
 function cleanCliError(stdout: string, stderr: string, fallback: string): string {
   const text = `${stderr}\n${stdout}`
     .split(/\r?\n/)
@@ -176,7 +182,7 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
   if (reg.status === "error") return finalize(agent.id, run, steps, "error");
 
   // Step 4: bind-twitter — build URL from agent.xUsername + template. First-time bind requires username.
-  const xUsername = opts.xUsername ?? agent.xUsername ?? null;
+  const xUsername = opts.xUsername ?? agent.xUsername ?? parseTweetUsername(opts.bindTweetUrl) ?? null;
   let bindUrl: string;
   if (opts.bindTweetUrl) {
     bindUrl = opts.bindTweetUrl;
@@ -192,6 +198,13 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
     if (twitter.status === "verified") {
       patchAgent(db, agent.id, { twitterBound: true, xUsername: twitter.username ?? agent.xUsername });
       return { status: "skipped", message: `already verified (${twitter.username ? `@${twitter.username}` : "username not recorded"})` };
+    }
+    if (twitter.status === "rejected" && twitter.username && twitter.username === xUsername && !opts.bindTweetUrl) {
+      patchAgent(db, agent.id, { twitterBound: false, xUsername: twitter.username });
+      return {
+        status: "skipped",
+        message: `twitter @${twitter.username} rejected upstream; provide a new valid X tweet URL/account before retrying bind`,
+      };
     }
     if (agent.twitterBound) {
       patchAgent(db, agent.id, { twitterBound: false, xUsername: twitter.username ?? agent.xUsername });
