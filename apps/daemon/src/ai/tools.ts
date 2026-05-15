@@ -744,10 +744,55 @@ export const TOOLS: AgentTool[] = [
   },
 ];
 
-export const TOOL_MAP = new Map(TOOLS.map((t) => [t.name, t]));
+const BLOCKED_WORKSPACE_TOOL_NAMES = new Set([
+  "apply_patch",
+  "bash",
+  "cat",
+  "cmd",
+  "command",
+  "copy_file",
+  "create_file",
+  "delete_file",
+  "edit",
+  "edit_file",
+  "exec",
+  "grep",
+  "list_files",
+  "ls",
+  "move_file",
+  "node",
+  "patch",
+  "powershell",
+  "python",
+  "read",
+  "read_file",
+  "replace_file",
+  "rg",
+  "run_command",
+  "shell",
+  "terminal",
+  "write",
+  "write_file",
+]);
+
+const BLOCKED_WORKSPACE_TOOL_PATTERNS = [
+  /^(read|write|edit|delete|move|copy|create|list|patch)_(file|files|dir|directory|workspace|repo|repository|project|source|code)$/i,
+  /^(file|files|filesystem|workspace|repo|repository|project|source|code)_(read|write|edit|delete|move|copy|create|list|patch)$/i,
+  /^(bash|shell|exec|command|terminal|powershell|python|node|apply_patch)(_|$)/i,
+];
+
+export function isWorkspaceToolName(name: string): boolean {
+  const clean = name.trim();
+  return BLOCKED_WORKSPACE_TOOL_NAMES.has(clean.toLowerCase()) ||
+    BLOCKED_WORKSPACE_TOOL_PATTERNS.some((pattern) => pattern.test(clean));
+}
+
+export const VISIBLE_TOOLS = TOOLS.filter((t) => !isWorkspaceToolName(t.name));
+
+export const TOOL_MAP = new Map(VISIBLE_TOOLS.map((t) => [t.name, t]));
 
 export function openAITools() {
-  return TOOLS.map((t) => ({
+  return VISIBLE_TOOLS.map((t) => ({
     type: "function" as const,
     function: {
       name: t.name,
@@ -758,6 +803,9 @@ export function openAITools() {
 }
 
 export async function runTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<unknown> {
+  if (isWorkspaceToolName(name)) {
+    throw new Error("workspace/code execution tools are disabled for this dashboard agent");
+  }
   const tool = TOOL_MAP.get(name);
   if (!tool) throw new Error(`unknown tool: ${name}`);
   return tool.handler(args, ctx);
