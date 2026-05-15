@@ -42,6 +42,7 @@ export interface RunAgentInput {
   userMessage: string;
   model?: string;
   contextAgentDbId?: string | null;
+  ownerEmail?: string | null;
   maxSteps?: number;
 }
 
@@ -57,7 +58,10 @@ export async function runAgentTurn(input: RunAgentInput): Promise<AgentTurn> {
   ];
 
   const toolDefs = openAITools();
-  const ctx: ToolContext = { contextAgentDbId: input.contextAgentDbId ?? null };
+  const ctx: ToolContext = {
+    contextAgentDbId: input.contextAgentDbId ?? null,
+    ownerEmail: input.ownerEmail ?? null,
+  };
   const toolCalls: ToolCall[] = [];
   let finalContent = "";
   let finishReason: string | null = null;

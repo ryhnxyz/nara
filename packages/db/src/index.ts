@@ -59,8 +59,10 @@ export function getAgent(db: Db, id: string, ownerEmail?: string | null): NaraAg
   return row ? rowToAgent(row) : null;
 }
 
-export function getAgentByAgentId(db: Db, agentId: string): NaraAgent | null {
-  const row = db.prepare("SELECT * FROM agents WHERE agent_id = ?").get(agentId) as any;
+export function getAgentByAgentId(db: Db, agentId: string, ownerEmail?: string | null): NaraAgent | null {
+  const row = ownerEmail
+    ? db.prepare("SELECT * FROM agents WHERE agent_id = ? AND owner_email = ?").get(agentId, ownerEmail) as any
+    : db.prepare("SELECT * FROM agents WHERE agent_id = ?").get(agentId) as any;
   return row ? rowToAgent(row) : null;
 }
 
@@ -256,7 +258,7 @@ export function appendChatMessage(
 export function threadMessages(db: Db, threadId: string, limit = 100, ownerEmail?: string | null): ChatMessage[] {
   const rows = ownerEmail
     ? db.prepare(
-        "SELECT * FROM chat_messages WHERE thread_id = ? AND (owner_email = ? OR owner_email IS NULL) ORDER BY created_at ASC LIMIT ?"
+        "SELECT * FROM chat_messages WHERE thread_id = ? AND owner_email = ? ORDER BY created_at ASC LIMIT ?"
       ).all(threadId, ownerEmail, limit) as any[]
     : db.prepare(
         "SELECT * FROM chat_messages WHERE thread_id = ? ORDER BY created_at ASC LIMIT ?"
@@ -271,10 +273,10 @@ export function listThreads(
   const rows = (ownerEmail
     ? db.prepare(`
         SELECT thread_id, agent_id, MAX(created_at) as last_at,
-          (SELECT content FROM chat_messages m2 WHERE m2.thread_id = m.thread_id ORDER BY created_at DESC LIMIT 1) as preview
-        FROM chat_messages m WHERE owner_email = ? OR owner_email IS NULL
+          (SELECT content FROM chat_messages m2 WHERE m2.thread_id = m.thread_id AND m2.owner_email = ? ORDER BY created_at DESC LIMIT 1) as preview
+        FROM chat_messages m WHERE owner_email = ?
         GROUP BY thread_id ORDER BY last_at DESC LIMIT 100
-      `).all(ownerEmail)
+      `).all(ownerEmail, ownerEmail)
     : db.prepare(`
         SELECT thread_id, agent_id, MAX(created_at) as last_at,
           (SELECT content FROM chat_messages m2 WHERE m2.thread_id = m.thread_id ORDER BY created_at DESC LIMIT 1) as preview
@@ -296,14 +298,14 @@ function snake(s: string): string {
 
 export function deleteThread(db: Db, threadId: string, ownerEmail?: string | null): number {
   const r = ownerEmail
-    ? db.prepare("DELETE FROM chat_messages WHERE thread_id = ? AND (owner_email = ? OR owner_email IS NULL)").run(threadId, ownerEmail)
+    ? db.prepare("DELETE FROM chat_messages WHERE thread_id = ? AND owner_email = ?").run(threadId, ownerEmail)
     : db.prepare("DELETE FROM chat_messages WHERE thread_id = ?").run(threadId);
   return r.changes;
 }
 
 export function deleteAllThreads(db: Db, ownerEmail?: string | null): number {
   const r = ownerEmail
-    ? db.prepare("DELETE FROM chat_messages WHERE owner_email = ? OR owner_email IS NULL").run(ownerEmail)
+    ? db.prepare("DELETE FROM chat_messages WHERE owner_email = ?").run(ownerEmail)
     : db.prepare("DELETE FROM chat_messages").run();
   return r.changes;
 }

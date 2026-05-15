@@ -30,8 +30,8 @@ export function portalSigningSecret(): string {
  * Keys are sorted alphabetically at every nesting level.
  */
 function sortedStringify(obj: unknown): string {
-  if (obj === null || obj === undefined) return "null";
-  if (typeof obj !== "object") return JSON.stringify(obj);
+  if (obj === null || obj === undefined) return "";
+  if (typeof obj !== "object") return String(obj);
   if (Array.isArray(obj)) return "[" + obj.map(sortedStringify).join(",") + "]";
   const keys = Object.keys(obj as Record<string, unknown>).sort();
   return (

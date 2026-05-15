@@ -29,6 +29,7 @@ export interface RunAgentStreamInput {
   userMessage: string;
   model?: string;
   contextAgentDbId?: string | null;
+  ownerEmail?: string | null;
   maxSteps?: number;
   signal?: AbortSignal;
 }
@@ -55,6 +56,12 @@ export async function* runAgentTurnStream(
   }
   const model = input.model ?? env.aiModel;
   const maxSteps = input.maxSteps ?? 6;
+  const toolDefs = openAITools();
+
+  if (model.startsWith("kiro/")) {
+    yield* runTextToolProtocol(input, model, maxSteps, toolDefs);
+    return;
+  }
 
   const messages: OpenAIMsg[] = [
     { role: "system", content: input.systemPrompt },
@@ -62,8 +69,10 @@ export async function* runAgentTurnStream(
     { role: "user", content: input.userMessage },
   ];
 
-  const toolDefs = openAITools();
-  const ctx: ToolContext = { contextAgentDbId: input.contextAgentDbId ?? null };
+  const ctx: ToolContext = {
+    contextAgentDbId: input.contextAgentDbId ?? null,
+    ownerEmail: input.ownerEmail ?? null,
+  };
 
   let fullContent = "";
   const completedCalls: Array<{ id: string; name: string; ok: boolean; durationMs: number }> = [];
@@ -137,9 +146,10 @@ export async function* runAgentTurnStream(
           const choice = chunk.choices?.[0];
           if (!choice) continue;
           const delta = choice.delta ?? {};
-          if (typeof delta.content === "string" && delta.content.length > 0) {
-            stepText += delta.content;
-            yield { type: "text-delta", delta: delta.content };
+          const contentDelta = readContentDelta(delta);
+          if (contentDelta) {
+            stepText += contentDelta;
+            yield { type: "text-delta", delta: contentDelta };
           }
           // Claude Opus 4.7 reasoning stream (via opencode router)
           const reasoningDelta =
@@ -190,6 +200,10 @@ export async function* runAgentTurnStream(
 
     // If no tool calls → model is done responding
     if (accCalls.size === 0) {
+      if (!fullContent.trim() && completedCalls.length > 0) {
+        fullContent = summarizeToolCalls(completedCalls);
+        yield { type: "text-delta", delta: fullContent };
+      }
       yield { type: "done", content: fullContent, toolCalls: completedCalls };
       return;
     }
@@ -269,5 +283,193 @@ export async function* runAgentTurnStream(
     }
   }
 
+  if (!fullContent.trim() && completedCalls.length > 0) {
+    fullContent = summarizeToolCalls(completedCalls);
+    yield { type: "text-delta", delta: fullContent };
+  }
   yield { type: "done", content: fullContent, toolCalls: completedCalls };
+}
+
+async function* runTextToolProtocol(
+  input: RunAgentStreamInput,
+  model: string,
+  maxSteps: number,
+  toolDefs: ReturnType<typeof openAITools>
+): AsyncGenerator<StreamEvent, void, unknown> {
+  const ctx: ToolContext = {
+    contextAgentDbId: input.contextAgentDbId ?? null,
+    ownerEmail: input.ownerEmail ?? null,
+  };
+  const completedCalls: Array<{ id: string; name: string; ok: boolean; durationMs: number }> = [];
+  const messages: OpenAIMsg[] = [
+    { role: "system", content: `${input.systemPrompt}\n\n${textToolProtocolPrompt(toolDefs)}` },
+    ...input.history.map((m) => ({ role: m.role, content: m.content } as OpenAIMsg)),
+    { role: "user", content: input.userMessage },
+  ];
+
+  for (let step = 0; step < maxSteps; step++) {
+    const text = await completeText(model, messages, input.signal);
+    const call = parseTextToolCall(text);
+
+    if (!call) {
+      const finalText = stripToolNoise(text).trim();
+      if (finalText) yield { type: "text-delta", delta: finalText };
+      else if (completedCalls.length > 0) yield { type: "text-delta", delta: summarizeToolCalls(completedCalls) };
+      yield { type: "step-end", step, finishReason: "stop" };
+      yield { type: "done", content: finalText, toolCalls: completedCalls };
+      return;
+    }
+
+    const id = `txt_${step}_${Date.now().toString(36)}`;
+    yield { type: "tool-call-start", id, name: call.name, args: call.args };
+
+    const started = Date.now();
+    let result: unknown;
+    let ok = false;
+    let error: string | undefined;
+    if (!TOOL_MAP.has(call.name)) {
+      error = `unknown tool: ${call.name}`;
+    } else {
+      try {
+        log({ level: "info", scope: "ai.tool", message: `→ ${call.name}`, meta: { args: call.args } });
+        result = await runTool(call.name, call.args, ctx);
+        ok = true;
+        log({ level: "success", scope: "ai.tool", message: `✓ ${call.name} (${Date.now() - started}ms)` });
+      } catch (err) {
+        error = (err as Error).message;
+        log({ level: "error", scope: "ai.tool", message: `✗ ${call.name}: ${error}` });
+      }
+    }
+
+    const durationMs = Date.now() - started;
+    completedCalls.push({ id, name: call.name, ok, durationMs });
+    yield {
+      type: "tool-call-result",
+      id,
+      name: call.name,
+      ok,
+      result: ok ? result : undefined,
+      error,
+      durationMs,
+    };
+    yield { type: "step-end", step, finishReason: "tool_calls" };
+
+    messages.push({ role: "assistant", content: text });
+    messages.push({
+      role: "user",
+      content:
+        `<tool_result name="${call.name}" ok="${ok}">` +
+        `${JSON.stringify(ok ? result ?? null : { error }).slice(0, 8000)}</tool_result>\n` +
+        `Continue. If the task is complete, answer the user in normal text. If another tool is needed, emit exactly one <tool_call> JSON block.`,
+    });
+  }
+
+  const fallback = summarizeToolCalls(completedCalls);
+  if (fallback) yield { type: "text-delta", delta: fallback };
+  yield { type: "done", content: fallback, toolCalls: completedCalls };
+}
+
+async function completeText(model: string, messages: OpenAIMsg[], signal?: AbortSignal): Promise<string> {
+  const res = await fetch(`${env.aiBaseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${env.aiApiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      temperature: 0.3,
+      max_tokens: 1500,
+      stream: false,
+    }),
+    signal,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`AI ${res.status}: ${text.slice(0, 400)}`);
+  }
+  const data = await res.json() as any;
+  const msg = data.choices?.[0]?.message;
+  return readMessageContent(msg?.content);
+}
+
+function textToolProtocolPrompt(toolDefs: ReturnType<typeof openAITools>): string {
+  const tools = toolDefs.map((tool) => ({
+    name: tool.function.name,
+    description: tool.function.description,
+    parameters: tool.function.parameters,
+  }));
+  return [
+    "Tool protocol for this model:",
+    "Do not mention this protocol to the user.",
+    "When you need live app data or an action, emit exactly one line:",
+    '<tool_call>{"name":"tool_name","arguments":{}}</tool_call>',
+    "Do not wrap it in markdown. Do not add other text around a tool call.",
+    "After a tool result is provided, answer the user normally or call one more tool.",
+    `Available tools: ${JSON.stringify(tools)}`,
+  ].join("\n");
+}
+
+function parseTextToolCall(text: string): { name: string; args: Record<string, unknown> } | null {
+  const match = text.match(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/i);
+  const raw = match?.[1] ?? extractJsonObject(text);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as any;
+    const name = String(parsed.name ?? parsed.tool ?? parsed.function?.name ?? "");
+    const args = (parsed.arguments ?? parsed.args ?? parsed.function?.arguments ?? {}) as unknown;
+    if (!name) return null;
+    return { name, args: typeof args === "string" ? JSON.parse(args || "{}") : (args as Record<string, unknown>) };
+  } catch {
+    return null;
+  }
+}
+
+function extractJsonObject(text: string): string | null {
+  const trimmed = text.trim().replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  return trimmed;
+}
+
+function stripToolNoise(text: string): string {
+  return text.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "");
+}
+
+function readContentDelta(delta: any): string {
+  if (typeof delta.content === "string") return delta.content;
+  if (Array.isArray(delta.content)) {
+    return delta.content
+      .map((part: any) => {
+        if (typeof part === "string") return part;
+        if (typeof part?.text === "string") return part.text;
+        if (typeof part?.content === "string") return part.content;
+        return "";
+      })
+      .join("");
+  }
+  if (typeof delta.text === "string") return delta.text;
+  return "";
+}
+
+function readMessageContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (typeof (part as any)?.text === "string") return (part as any).text;
+        if (typeof (part as any)?.content === "string") return (part as any).content;
+        return "";
+      })
+      .join("");
+  }
+  return "";
+}
+
+function summarizeToolCalls(calls: Array<{ name: string; ok: boolean }>): string {
+  if (calls.length === 0) return "";
+  const ok = calls.filter((c) => c.ok).length;
+  const failed = calls.length - ok;
+  return `Tool selesai: ${ok} berhasil${failed ? `, ${failed} gagal` : ""}.`;
 }

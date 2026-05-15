@@ -88,7 +88,7 @@ aiRoute.post("/chat", async (c) => {
     ownerEmail: owner,
   });
 
-  const history = threadMessages(db, body.threadId, 40);
+  const history = threadMessages(db, body.threadId, 40, owner);
 
   const system = buildSystemPrompt(agent, body.systemExtra);
 
@@ -111,6 +111,7 @@ aiRoute.post("/chat", async (c) => {
       agentId: agent?.id ?? null,
       role: "assistant",
       content: answer,
+      ownerEmail: owner,
     });
     return c.json({ message: saved });
   } catch (err) {
@@ -146,7 +147,7 @@ aiRoute.post("/agent", async (c) => {
     ownerEmail: owner,
   });
 
-  const history = threadMessages(db, body.threadId, 40)
+  const history = threadMessages(db, body.threadId, 40, owner)
     .filter((m) => m.role === "user" || m.role === "assistant")
     .slice(0, -1)
     .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
@@ -160,6 +161,7 @@ aiRoute.post("/agent", async (c) => {
       userMessage: body.content,
       model: body.model,
       contextAgentDbId: contextAgent?.id ?? null,
+      ownerEmail: owner,
       maxSteps: body.maxSteps ?? 6,
     });
 
@@ -210,7 +212,7 @@ aiRoute.post("/agent/stream", async (c) => {
     ownerEmail: owner,
   });
 
-  const history = threadMessages(db, body.threadId, 40)
+  const history = threadMessages(db, body.threadId, 40, owner)
     .filter((m) => m.role === "user" || m.role === "assistant")
     .slice(0, -1)
     .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
@@ -230,6 +232,7 @@ aiRoute.post("/agent/stream", async (c) => {
         userMessage: body.content,
         model: body.model,
         contextAgentDbId: contextAgent?.id ?? null,
+        ownerEmail: owner,
         maxSteps: body.maxSteps ?? 6,
         signal: abort.signal,
       })) {
@@ -249,6 +252,7 @@ aiRoute.post("/agent/stream", async (c) => {
             agentId: contextAgent?.id ?? null,
             role: "assistant",
             content,
+            ownerEmail: owner,
           });
           break;
         }
@@ -261,6 +265,7 @@ aiRoute.post("/agent/stream", async (c) => {
         agentId: contextAgent?.id ?? null,
         role: "assistant",
         content: `(stream error: ${message})`,
+        ownerEmail: owner,
       });
     }
   });
@@ -374,6 +379,11 @@ function buildAgenticSystemPrompt(agent: any): string {
     `"fund agent" / "isi wallet":`,
     `  → fund_agent_from_master(agentDbId). Default 0.15 NARA.`,
     ``,
+    `"send NARA" / "transfer NARA" / "kirim NARA" dari agent A ke agent B:`,
+    `  → list_agents/get_agent to resolve source + target, then transfer_between_agents(sourceAgentId/sourceAgentDbId, targetAgentId/targetAgentDbId, amount).`,
+    `  → If target is a raw wallet address, use transfer_from_agent(source, to, amount).`,
+    `  → If amount/source/target is missing, ask once. If complete, execute the transfer; do not only explain.`,
+    ``,
     `"debug" / "kenapa error":`,
     `  → get_agent → get_balance → get_recent_logs(agentDbId) → get_last_flow_run. Read actual errors.`,
     ``,
@@ -389,6 +399,8 @@ function buildAgenticSystemPrompt(agent: any): string {
     `- If user says "hunt dragon ball" and DM is empty, DO NOT conclude there are no balls.`,
     `  Explain 3 channels, enable hunt worker, mention feed drops + lottery mechanics.`,
     `- MATCH the user's actual intent — don't default to simplest read-only tool.`,
+    `- For send/transfer/kirim NARA requests: if source, destination, and amount are provided, execute transfer_between_agents or transfer_from_agent. Do not only explain.`,
+    `- For agent-to-agent transfer, resolve names with list_agents/get_agent, then call transfer_between_agents. For raw wallet destination, call transfer_from_agent.`,
     `- Before first-time run_flow: check agent.xUsername. If null → set_agent_x_username first.`,
     `- Only operate on agents in THIS dashboard. No cross-user access.`,
     `- NEVER print wallet private keys or mnemonics.`,

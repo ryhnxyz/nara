@@ -20,6 +20,7 @@ import { getDistributeState, runDistribution, configureDistribute } from "../wor
 import { getHuntState, configureHunt, runPoll as runHuntPoll, listHuntRuns } from "../workers/hunt";
 import { env } from "../lib/env";
 import { generateTweet } from "./tweet-gen";
+import { ownerMasterWalletPath } from "../lib/owner";
 
 /**
  * OpenAI-compatible function/tool schema.
@@ -38,10 +39,11 @@ export interface AgentTool {
 
 export interface ToolContext {
   contextAgentDbId?: string | null;
+  ownerEmail?: string | null;
 }
 
-function needAgent(agentDbId: string) {
-  const agent = getAgent(openDb(), agentDbId);
+function needAgent(agentDbId: string, ownerEmail?: string | null) {
+  const agent = getAgent(openDb(), agentDbId, ownerEmail ?? null);
   if (!agent) throw new Error(`agent ${agentDbId} not found`);
   return agent;
 }
@@ -49,16 +51,36 @@ function needAgent(agentDbId: string) {
 function resolveAgent(args: Record<string, unknown>, ctx: ToolContext) {
   const id = (args.agentDbId as string) ?? ctx.contextAgentDbId;
   if (!id) throw new Error("no agent selected (set ctx or pass agentDbId)");
-  return needAgent(id);
+  return needAgent(id, ctx.ownerEmail);
+}
+
+function resolveAgentByAnyId(args: Record<string, unknown>, ctx: ToolContext, prefix = "") {
+  const db = openDb();
+  const dbKey = `${prefix}AgentDbId`;
+  const idKey = `${prefix}AgentId`;
+  const dbId = args[dbKey] ? String(args[dbKey]) : null;
+  const agentId = args[idKey] ? String(args[idKey]) : null;
+  if (dbId) return needAgent(dbId, ctx.ownerEmail);
+  if (agentId) {
+    const agent = getAgentByAgentId(db, agentId, ctx.ownerEmail ?? null);
+    if (!agent) throw new Error(`agent-id ${agentId} not found`);
+    return agent;
+  }
+  if (!prefix && ctx.contextAgentDbId) return needAgent(ctx.contextAgentDbId, ctx.ownerEmail);
+  throw new Error(`${prefix || "source"} agent not specified`);
+}
+
+function masterWalletPath(ownerEmail?: string | null) {
+  return ownerEmail ? ownerMasterWalletPath(ownerEmail) : resolve(env.walletsDir, "..", "master-wallet.json");
 }
 
 export const TOOLS: AgentTool[] = [
   {
     name: "list_agents",
-    description: "List all registered agents with wallet status, X binding, stake, and earnings.",
+    description: "List the current user's registered agents with wallet status, X binding, stake, and earnings. Use this first when the user refers to an agent by name/agent-id.",
     parameters: { type: "object", properties: {} },
-    handler: async () => {
-      const agents = listAgents(openDb()).map((a) => ({
+    handler: async (_args, ctx) => {
+      const agents = listAgents(openDb(), ctx.ownerEmail ?? null).map((a) => ({
         id: a.id,
         agentId: a.agentId,
         status: a.status,
@@ -86,9 +108,9 @@ export const TOOLS: AgentTool[] = [
     handler: async (args, ctx) => {
       const db = openDb();
       let agent = null;
-      if (args.agentId) agent = getAgentByAgentId(db, String(args.agentId));
+      if (args.agentId) agent = getAgentByAgentId(db, String(args.agentId), ctx.ownerEmail ?? null);
       else if (args.agentDbId || ctx.contextAgentDbId) {
-        agent = getAgent(db, (args.agentDbId as string) ?? ctx.contextAgentDbId!);
+        agent = getAgent(db, (args.agentDbId as string) ?? ctx.contextAgentDbId!, ctx.ownerEmail ?? null);
       }
       if (!agent) throw new Error("agent not found");
       return agent;
@@ -107,13 +129,14 @@ export const TOOLS: AgentTool[] = [
       },
       required: ["agentId"],
     },
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const cleaned = sanitizeAgentId(String(args.agentId));
       if (!isValidAgentId(cleaned)) throw new Error("invalid agent-id");
       const agent = createAgentRecord(openDb(), {
         agentId: cleaned,
         displayName: args.displayName ? String(args.displayName) : undefined,
         referral: args.referral ? String(args.referral) : null,
+        ownerEmail: ctx.ownerEmail ?? null,
       });
       return agent;
     },
@@ -341,8 +364,8 @@ export const TOOLS: AgentTool[] = [
     name: "get_master_wallet_state",
     description: "Get state of the operator's master wallet (address + balance). The master wallet funds agents and is the default sweep target.",
     parameters: { type: "object", properties: {} },
-    handler: async () => {
-      const path = resolve(env.walletsDir, "..", "master-wallet.json");
+    handler: async (_args, ctx) => {
+      const path = masterWalletPath(ctx.ownerEmail);
       if (!existsSync(path)) return { imported: false };
       const addr = await naracli.address({ walletPath: path });
       const bal = await naracli.balance({ walletPath: path });
@@ -363,7 +386,7 @@ export const TOOLS: AgentTool[] = [
     handler: async (args, ctx) => {
       const agent = resolveAgent(args, ctx);
       if (!agent.walletAddress) return { error: "agent has no wallet yet" };
-      const masterPath = resolve(env.walletsDir, "..", "master-wallet.json");
+      const masterPath = masterWalletPath(ctx.ownerEmail);
       if (!existsSync(masterPath)) return { error: "master wallet not imported" };
       const amount = Number(args.amount ?? env.minWalletBalance);
       const r = await naracli.transfer(agent.walletAddress, amount, {
@@ -379,7 +402,7 @@ export const TOOLS: AgentTool[] = [
 
   {
     name: "transfer_from_agent",
-    description: "Transfer NARA from an agent's wallet to any destination address. Use this to manually consolidate earnings.",
+    description: "Transfer NARA from an agent's wallet to any destination wallet address. Use this when the user gives a raw Nara wallet address.",
     parameters: {
       type: "object",
       properties: {
@@ -399,7 +422,55 @@ export const TOOLS: AgentTool[] = [
         logScope: "ai.transfer",
       });
       if (!r.ok) return { ok: false, error: r.stderr.slice(0, 300) };
-      return { ok: true, txSignature: extractTxSignature(r.stdout) };
+      return {
+        ok: true,
+        fromAgent: agent.agentId,
+        from: agent.walletAddress,
+        to: String(args.to),
+        amount: Number(args.amount),
+        txSignature: extractTxSignature(r.stdout),
+      };
+    },
+  },
+
+  {
+    name: "transfer_between_agents",
+    description:
+      "Transfer NARA from one of the current user's agents to another agent's wallet. Use this when the user says send/kirim/transfer NARA from agent A to agent B. Accepts agent DB ids or on-chain agent-ids.",
+    parameters: {
+      type: "object",
+      properties: {
+        sourceAgentDbId: { type: "string", description: "source internal DB id" },
+        sourceAgentId: { type: "string", description: "source on-chain agent-id" },
+        targetAgentDbId: { type: "string", description: "target internal DB id" },
+        targetAgentId: { type: "string", description: "target on-chain agent-id" },
+        amount: { type: "number", description: "NARA amount to transfer" },
+      },
+      required: ["amount"],
+    },
+    handler: async (args, ctx) => {
+      const source = resolveAgentByAnyId(args, ctx, "source");
+      const target = resolveAgentByAnyId(args, ctx, "target");
+      const amount = Number(args.amount);
+      if (!Number.isFinite(amount) || amount <= 0) return { ok: false, error: "amount must be > 0" };
+      if (!source.walletPath) return { ok: false, error: "source agent wallet not ready" };
+      if (!target.walletAddress) return { ok: false, error: "target agent has no wallet address" };
+      const r = await naracli.transfer(target.walletAddress, amount, {
+        walletPath: source.walletPath,
+        agentId: source.agentId,
+        timeoutMs: 180_000,
+        logScope: "ai.transfer.agent-to-agent",
+      });
+      if (!r.ok) return { ok: false, error: r.stderr.slice(0, 500), stdout: r.stdout.slice(0, 500) };
+      return {
+        ok: true,
+        amount,
+        fromAgent: source.agentId,
+        from: source.walletAddress,
+        toAgent: target.agentId,
+        to: target.walletAddress,
+        txSignature: extractTxSignature(r.stdout),
+      };
     },
   },
 

@@ -1,9 +1,19 @@
+import { readSessionFromCookies } from "@/lib/session";
+
 const DAEMON_URL = process.env.NARA_DAEMON_URL ?? "http://localhost:4000";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("content-type")) headers.set("content-type", "application/json");
+
+  if (!headers.has("x-owner-email")) {
+    const session = await readSessionFromCookies();
+    if (session?.email) headers.set("x-owner-email", session.email);
+  }
+
   const res = await fetch(`${DAEMON_URL}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers,
     cache: "no-store",
   });
   if (!res.ok) {
@@ -37,6 +47,9 @@ export const daemon = {
     request<{ claims: any[] }>(`/api/dragonball/claims${agentId ? `?agentId=${agentId}` : ""}`),
   manualClaim: (input: { agentDbId: string; code: string; tweetUrl?: string; walletPath?: string }) =>
     request<any>("/api/dragonball/manual-claim", { method: "POST", body: JSON.stringify(input) }),
+
+  huntState: () => request<any>("/api/automation/hunt/state"),
+  huntRuns: (limit = 50) => request<any>(`/api/automation/hunt/runs?limit=${limit}`),
 
   aiModels: () => request<any>("/api/ai/models"),
   aiTweet: (input: any) => request<any>("/api/ai/tweet", { method: "POST", body: JSON.stringify(input) }),

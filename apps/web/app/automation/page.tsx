@@ -6,8 +6,8 @@ export const dynamic = "force-dynamic";
 async function load() {
   try {
     const [stateRes, runsRes, agentsRes] = await Promise.all([
-      fetch(`${daemon.url}/api/automation/hunt/state`, { cache: "no-store" }).then((r) => r.json()),
-      fetch(`${daemon.url}/api/automation/hunt/runs?limit=50`, { cache: "no-store" }).then((r) => r.json()),
+      daemon.huntState(),
+      daemon.huntRuns(50),
       daemon.listAgents(),
     ]);
     return { state: stateRes, runs: runsRes.runs ?? [], agents: agentsRes.agents, error: null as string | null };

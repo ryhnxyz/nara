@@ -1,10 +1,63 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { configureHunt, getHuntState, huntEvents, listHuntRuns, runPoll } from "../workers/hunt";
+import { openDb, countAutomationRunsToday, recentAutomationRuns } from "@nara-bot/db";
+import { ownerFromContext } from "../lib/owner";
+import { configureHunt, getHuntState, huntEvents, runPoll } from "../workers/hunt";
 
 export const automationRoute = new Hono();
 
-automationRoute.get("/hunt/state", (c) => c.json(getHuntState()));
+const WORKER_KEY = "hunt";
+
+function ownerHuntState(ownerEmail: string | null) {
+  const base = getHuntState();
+  if (!ownerEmail) return base;
+
+  const db = openDb();
+  const runStats = db.prepare(`
+    SELECT
+      COUNT(*) AS total_runs,
+      COALESCE(SUM(codes_found), 0) AS codes_found,
+      COALESCE(SUM(codes_claimed), 0) AS codes_claimed,
+      COALESCE(SUM(nara_earned), 0) AS nara_earned,
+      COALESCE(SUM(CASE WHEN note LIKE '%engaged=%' THEN 1 ELSE 0 END), 0) AS engagements
+    FROM automation_runs
+    WHERE worker = ? AND owner_email = ?
+  `).get(WORKER_KEY, ownerEmail) as any;
+
+  const claimStats = db.prepare(`
+    SELECT
+      COUNT(c.id) AS found,
+      COALESCE(SUM(CASE WHEN c.status IN ('claimed', 'boosted') THEN 1 ELSE 0 END), 0) AS claimed
+    FROM dragonball_claims c
+    INNER JOIN agents a ON a.id = c.agent_id
+    WHERE a.owner_email = ?
+  `).get(ownerEmail) as any;
+
+  const targetAgentIds = base.targetAgentIds
+    ? base.targetAgentIds.filter((id) => {
+        const row = db.prepare("SELECT 1 FROM agents WHERE id = ? AND owner_email = ?").get(id, ownerEmail);
+        return !!row;
+      })
+    : null;
+  const currentAgentId = base.currentAgentId &&
+    db.prepare("SELECT 1 FROM agents WHERE id = ? AND owner_email = ?").get(base.currentAgentId, ownerEmail)
+      ? base.currentAgentId
+      : null;
+
+  return {
+    ...base,
+    targetAgentIds,
+    runsToday: countAutomationRunsToday(db, WORKER_KEY, ownerEmail),
+    totalRuns: Number(runStats?.total_runs ?? 0),
+    totalCodesFound: Number(claimStats?.found ?? runStats?.codes_found ?? 0),
+    totalCodesClaimed: Number(claimStats?.claimed ?? runStats?.codes_claimed ?? 0),
+    totalEngagements: Number(runStats?.engagements ?? 0),
+    totalNaraEarned: Number(runStats?.nara_earned ?? 0),
+    currentAgentId,
+  };
+}
+
+automationRoute.get("/hunt/state", (c) => c.json(ownerHuntState(ownerFromContext(c))));
 
 automationRoute.post("/hunt/configure", async (c) => {
   type ConfigureBody = {
@@ -37,18 +90,18 @@ automationRoute.post("/hunt/configure", async (c) => {
   if (body.likesPerPoll !== undefined) patch.likesPerPoll = Math.max(0, Math.min(20, Number(body.likesPerPoll)));
   if (body.commentsPerPoll !== undefined) patch.commentsPerPoll = Math.max(0, Math.min(5, Number(body.commentsPerPoll)));
   if (body.followsPerPoll !== undefined) patch.followsPerPoll = Math.max(0, Math.min(10, Number(body.followsPerPoll)));
-  const state = configureHunt(patch);
-  return c.json({ ok: true, state });
+  configureHunt(patch);
+  return c.json({ ok: true, state: ownerHuntState(ownerFromContext(c)) });
 });
 
 automationRoute.post("/hunt/run-now", async (c) => {
   const res = await runPoll();
-  return c.json({ ok: true, ...res, state: getHuntState() });
+  return c.json({ ok: true, ...res, state: ownerHuntState(ownerFromContext(c)) });
 });
 
 automationRoute.get("/hunt/runs", (c) => {
   const limit = Number(c.req.query("limit") ?? 50);
-  const runs = listHuntRuns(limit);
+  const runs = recentAutomationRuns(openDb(), WORKER_KEY, limit, ownerFromContext(c));
   return c.json({ runs });
 });
 
@@ -64,9 +117,10 @@ automationRoute.get("/hunt/stream", (c) =>
       }
     };
 
-    await send(getHuntState());
-    const handler = (s: unknown) => {
-      void send(s);
+    const ownerEmail = ownerFromContext(c);
+    await send(ownerHuntState(ownerEmail));
+    const handler = () => {
+      void send(ownerHuntState(ownerEmail));
     };
     huntEvents.on("state", handler);
 

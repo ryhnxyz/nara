@@ -5,6 +5,7 @@ import { logger as httpLogger } from "hono/logger";
 import { initDb, openDb } from "@nara-bot/db";
 import { env } from "./lib/env";
 import { log } from "./lib/logger";
+import { requireOwner } from "./lib/owner";
 import { agentsRoute } from "./routes/agents";
 import { logsRoute } from "./routes/logs";
 import { dragonballRoute } from "./routes/dragonball";
@@ -31,6 +32,8 @@ app.get("/", (c) =>
 );
 app.get("/health", (c) => c.json({ ok: true, ts: Date.now() }));
 
+app.use("/api/*", requireOwner);
+
 app.route("/api/agents", agentsRoute);
 app.route("/api/logs", logsRoute);
 app.route("/api/dragonball", dragonballRoute);
@@ -50,8 +53,9 @@ initDb(openDb());
 startDistributeWorker();
 initHuntWorker();
 
-serve({ fetch: app.fetch, port: env.port, hostname: "0.0.0.0" }, (info) => {
-  log({ level: "success", scope: "daemon", message: `Nara bot daemon listening on 0.0.0.0:${info.port}` });
+const daemonHost = process.env.DAEMON_HOST ?? "127.0.0.1";
+serve({ fetch: app.fetch, port: env.port, hostname: daemonHost }, (info) => {
+  log({ level: "success", scope: "daemon", message: `Nara bot daemon listening on ${daemonHost}:${info.port}` });
   log({
     level: "info",
     scope: "daemon",
