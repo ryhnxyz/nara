@@ -35,6 +35,32 @@ function buildTweetUrl(username: string, template: string): string {
   return template.replace(/x\.com\/[^/]+\/status/, `x.com/${clean}/status`);
 }
 
+function cleanCliError(stdout: string, stderr: string, fallback: string): string {
+  const text = `${stderr}\n${stdout}`
+    .split(/\r?\n/)
+    .filter((line) => !/^npm (warn|notice) /i.test(line.trim()))
+    .join("\n")
+    .trim();
+  const anchor = text.match(/Error Code:\s*([A-Za-z0-9_]+)\.[\s\S]*?Error Message:\s*([^\n"]+)/i);
+  if (anchor) return `${anchor[1]}: ${anchor[2].trim()}`;
+  const firstError = text.split(/\r?\n/).find((line) => /error|failed|rejected/i.test(line));
+  return (firstError ?? text).slice(0, 300) || fallback;
+}
+
+function parseTwitterStatus(text: string): { username: string | null; status: "verified" | "pending" | "rejected" | "none" | "unknown" } {
+  const line = text.split(/\r?\n/).find((l) => /^\s*Twitter:/i.test(l));
+  if (!line) return { username: null, status: "unknown" };
+  if (/\(none\)/i.test(line)) return { username: null, status: "none" };
+  const username = line.match(/@([A-Za-z0-9_]{1,20})/)?.[1] ?? null;
+  const rawStatus = line.match(/\(([^)]+)\)/)?.[1]?.toLowerCase() ?? "verified";
+  const status =
+    rawStatus.includes("reject") ? "rejected" :
+    rawStatus.includes("pending") || rawStatus.includes("submitted") ? "pending" :
+    rawStatus.includes("verif") || rawStatus.includes("accept") || rawStatus === "ok" ? "verified" :
+    rawStatus ? "unknown" : "verified";
+  return { username, status };
+}
+
 const active = new Map<string, AbortController>();
 
 export function isFlowActive(agentId: string): boolean {
@@ -161,7 +187,15 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
   }
 
   const bindStep = await record("bind-twitter", async () => {
-    if (agent.twitterBound) return { status: "skipped", message: `already bound (${agent.xUsername ?? "username not recorded"})` };
+    const upstream = await naracli.agentGet(agent.agentId, { walletPath: wallet.path, agentId: agent.agentId, timeoutMs: 60_000 });
+    const twitter = parseTwitterStatus(upstream.stdout);
+    if (twitter.status === "verified") {
+      patchAgent(db, agent.id, { twitterBound: true, xUsername: twitter.username ?? agent.xUsername });
+      return { status: "skipped", message: `already verified (${twitter.username ? `@${twitter.username}` : "username not recorded"})` };
+    }
+    if (agent.twitterBound) {
+      patchAgent(db, agent.id, { twitterBound: false, xUsername: twitter.username ?? agent.xUsername });
+    }
     if (!xUsername && !opts.bindTweetUrl) {
       return {
         status: "error",
@@ -175,10 +209,14 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
         patchAgent(db, agent.id, { twitterBound: true, xUsername: xUsername ?? agent.xUsername });
         return { status: "skipped", message: "already bound (upstream)" };
       }
-      return { status: "error", message: r.stderr.slice(0, 200) || "bind-twitter failed" };
+      return { status: "error", message: cleanCliError(r.stdout, r.stderr, "bind-twitter failed") };
     }
-    patchAgent(db, agent.id, { twitterBound: true, xUsername: xUsername ?? agent.xUsername });
-    return { status: "success", message: `twitter bound as @${xUsername ?? "?"}`, meta: { tweet: bindUrl, xUsername } };
+    patchAgent(db, agent.id, { twitterBound: false, xUsername: xUsername ?? agent.xUsername });
+    return {
+      status: "skipped",
+      message: `twitter verification submitted for @${xUsername ?? "?"}; wait until Agent Registry marks it verified before daily tweet`,
+      meta: { tweet: bindUrl, xUsername },
+    };
   });
   if (bindStep.status === "error") return finalize(agent.id, run, steps, "error");
 
@@ -206,6 +244,20 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
   // Step 6: submit-daily-tweet (optional)
   if (!opts.skipDailyTweet) {
     await record("submit-daily-tweet", async () => {
+      const getR = await naracli.agentGet(agent.agentId, { walletPath: wallet.path, agentId: agent.agentId, timeoutMs: 60_000 });
+      const twitter = parseTwitterStatus(getR.stdout);
+      if (twitter.status !== "verified") {
+        patchAgent(db, agent.id, { twitterBound: false, xUsername: twitter.username ?? agent.xUsername });
+        return {
+          status: "skipped",
+          message:
+            twitter.status === "rejected"
+              ? `twitter @${twitter.username ?? "?"} rejected upstream; bind a valid X tweet/account before daily tweet`
+              : `twitter not verified yet (${twitter.status}); retry daily tweet after verification`,
+          meta: twitter,
+        };
+      }
+      patchAgent(db, agent.id, { twitterBound: true, xUsername: twitter.username ?? agent.xUsername });
       const tweetUrl = opts.dailyTweetUrl || bindUrl;
       if (!tweetUrl) return { status: "skipped", message: "no tweet URL provided" };
       const r = await naracli.agentSubmitTweet(tweetUrl, agent.agentId, { walletPath: wallet.path, timeoutMs: 180_000 });
@@ -213,7 +265,11 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
         if (/already submitted|cooldown/i.test(r.stdout + r.stderr)) {
           return { status: "skipped", message: "already submitted today" };
         }
-        return { status: "error", message: r.stderr.slice(0, 200) || "submit-tweet failed" };
+        if (/TwitterNotVerified|Twitter account is not in verified status/i.test(r.stdout + r.stderr)) {
+          patchAgent(db, agent.id, { twitterBound: false });
+          return { status: "skipped", message: "twitter not verified upstream; daily tweet skipped" };
+        }
+        return { status: "error", message: cleanCliError(r.stdout, r.stderr, "submit-tweet failed") };
       }
       return { status: "success", message: "daily tweet submitted" };
     });
@@ -289,6 +345,20 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
   if (!opts.skipFirstPost) {
     await record("first-post-campaign", async () => {
       if (agent.firstPostDone) return { status: "skipped", message: "already done" };
+      const twitterR = await naracli.agentGet(agent.agentId, { walletPath: wallet.path, agentId: agent.agentId, timeoutMs: 60_000 });
+      const twitter = parseTwitterStatus(twitterR.stdout);
+      if (twitter.status !== "verified") {
+        patchAgent(db, agent.id, { twitterBound: false, xUsername: twitter.username ?? agent.xUsername });
+        return {
+          status: "skipped",
+          message:
+            twitter.status === "rejected"
+              ? `twitter @${twitter.username ?? "?"} rejected upstream; first-post campaign needs a verified X account`
+              : `twitter not verified yet (${twitter.status}); first-post campaign skipped for now`,
+          meta: twitter,
+        };
+      }
+      patchAgent(db, agent.id, { twitterBound: true, xUsername: twitter.username ?? agent.xUsername });
       // Check if already submitted
       const statusR = await agentx.campaignStatus(0, { walletPath: wallet.path, agentId: agent.agentId, timeoutMs: 60_000 });
       if (statusR.ok && /claimed|submitted/i.test(statusR.stdout)) {
@@ -311,7 +381,7 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
         ["-j", "post", postContent],
         { walletPath: wallet.path, agentId: agent.agentId, timeoutMs: 120_000, logScope: "agentx.post" }
       );
-      if (!postR.ok) return { status: "error", message: `post failed: ${postR.stderr.slice(0, 200)}` };
+      if (!postR.ok) return { status: "error", message: `post failed: ${cleanCliError(postR.stdout, postR.stderr, "post failed")}` };
 
       let postId: string | null = null;
       try {
@@ -338,7 +408,7 @@ export async function runFullFlow(agentDbId: string, opts: FlowOptions = {}): Pr
         { walletPath: wallet.path, agentId: agent.agentId, timeoutMs: 180_000, logScope: "agentx.campaign.submit" }
       );
       if (!submitR.ok) {
-        return { status: "error", message: submitR.stderr.slice(0, 200) || "campaign submit failed" };
+        return { status: "error", message: cleanCliError(submitR.stdout, submitR.stderr, "campaign submit failed") };
       }
       patchAgent(db, agent.id, { firstPostDone: true });
       return {
