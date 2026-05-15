@@ -1,4 +1,6 @@
 import { execa, type Options as ExecaOptions } from "execa";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { env } from "../lib/env";
 import { log } from "../lib/logger";
 
@@ -37,6 +39,47 @@ function buildExec(bin: "naracli" | "agentx-cli", args: string[], opts: RunOpts)
   return { command, args: finalArgs };
 }
 
+function safeName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80);
+}
+
+function stripNpmWarnings(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !/^npm warn Unknown env config /i.test(line.trim()))
+    .join("\n")
+    .trim();
+}
+
+function buildCleanEnv(bin: "naracli" | "agentx-cli", opts: RunOpts): NodeJS.ProcessEnv {
+  const clean: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (/^npm_config_/i.test(key) || /^npm_package_/i.test(key) || /^npm_lifecycle_/i.test(key)) continue;
+    clean[key] = value;
+  }
+
+  // Keep npx fast while preventing inherited pnpm/npm configs from being treated as invalid npm configs.
+  clean.npm_config_cache = process.env.npm_config_cache ?? resolve(env.walletsDir, "..", ".npm-cache");
+
+  if (bin === "agentx-cli" && opts.agentId) {
+    const home = resolve(env.walletsDir, "..", "agentx-homes", safeName(opts.agentId));
+    const naraConfigDir = resolve(home, ".config", "nara");
+    mkdirSync(naraConfigDir, { recursive: true });
+    writeFileSync(
+      resolve(naraConfigDir, "agentx.json"),
+      JSON.stringify({ default_agent_id: opts.agentId }, null, 2) + "\n"
+    );
+    writeFileSync(
+      resolve(naraConfigDir, "agent-mainnet-api-nara-build.json"),
+      JSON.stringify({ agent_id: opts.agentId }, null, 2) + "\n"
+    );
+    clean.HOME = home;
+    clean.USERPROFILE = home;
+  }
+
+  return { ...clean, ...(opts.extraEnv ?? {}) };
+}
+
 async function runCli(bin: "naracli" | "agentx-cli", args: string[], opts: RunOpts = {}): Promise<CliResult> {
   const { command, args: finalArgs } = buildExec(bin, args, opts);
   const started = Date.now();
@@ -51,18 +94,20 @@ async function runCli(bin: "naracli" | "agentx-cli", args: string[], opts: RunOp
 
   const execOpts: ExecaOptions = {
     timeout: opts.timeoutMs ?? 180_000,
-    env: { ...process.env, ...(opts.extraEnv ?? {}) },
+    env: buildCleanEnv(bin, opts),
     reject: false,
   };
 
   try {
     const res = await execa(command, finalArgs, execOpts);
+    const stdout = res.stdout?.toString() ?? "";
+    const stderr = stripNpmWarnings(res.stderr?.toString() ?? "");
     const payload: CliResult = {
       bin,
       args: finalArgs,
       exitCode: res.exitCode,
-      stdout: res.stdout?.toString() ?? "",
-      stderr: res.stderr?.toString() ?? "",
+      stdout,
+      stderr,
       durationMs: Date.now() - started,
       ok: res.exitCode === 0,
     };
